@@ -98,7 +98,7 @@ jobs:
         run: |
           VERSION=${{ steps.build.outputs.version }}
           VERSION_NUM=${{ steps.build.outputs.version_num }}
-          BASE_URL="https://github.com/brunoborges/ghx/releases/download/${VERSION}"
+          BASE_URL="https://github.com/${{ github.repository }}/releases/download/${VERSION}"
 
           SHA_DARWIN_ARM64=${{ steps.checksums.outputs.SHA_DARWIN_ARM64 }}
           SHA_DARWIN_AMD64=${{ steps.checksums.outputs.SHA_DARWIN_AMD64 }}
@@ -107,8 +107,8 @@ jobs:
 
           cat > ghx.rb << FORMULA
           class Ghx < Formula
-            desc "GitHub CLI Cache Proxy — caching daemon for gh to prevent API rate limiting"
-            homepage "https://github.com/brunoborges/ghx"
+            desc "GitHub CLI Cache Proxy — caching daemon for gh to prevent API rate limiting (valkyriweb fork)"
+            homepage "https://github.com/${{ github.repository }}"
             version "${VERSION_NUM}"
             license "MIT"
 
@@ -167,7 +167,7 @@ jobs:
           cat ghx.rb
 
           # Clone the tap, update formula, push
-          git clone "https://x-access-token:${TAP_TOKEN}@github.com/brunoborges/homebrew-tap.git" tap
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/valkyriweb/homebrew-tap.git" tap
           mkdir -p tap/Formula
           cp ghx.rb tap/Formula/ghx.rb
           cd tap
