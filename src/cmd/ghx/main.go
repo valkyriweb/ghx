@@ -50,6 +50,24 @@ func main() {
 	// Resolve real gh binary (lazy — only on execution path)
 	mustResolveGH(cfg)
 
+	// Bypass the daemon for interactive/auth commands. These open a browser or
+	// wait on device-flow input, run far longer than any proxy timeout, and must
+	// never be cached. Run them directly so they own the terminal.
+	if len(ghArgs) > 0 && ghArgs[0] == "auth" {
+		execDirect(cfg.GHPath, ghArgs)
+		return
+	}
+
+	// Bypass the daemon when stdin is piped. The daemon protocol does not
+	// forward stdin, so commands that read it (gh secret set, gh api --input -,
+	// gh issue create --body-file -, etc.) would silently receive an empty
+	// stream. Caching stdin-driven calls is also low value — they're writes,
+	// not reads. execDirect replaces the current process so stdin is preserved.
+	if stat, err := os.Stdin.Stat(); err == nil && (stat.Mode()&os.ModeCharDevice) == 0 {
+		execDirect(cfg.GHPath, ghArgs)
+		return
+	}
+
 	// Resolve execution context
 	ctx := execctx.Resolve(cfg.GHPath)
 

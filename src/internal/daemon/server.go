@@ -142,7 +142,11 @@ func (s *Server) handleConn(conn net.Conn) {
 	defer s.wg.Done()
 	defer conn.Close()
 
-	conn.SetDeadline(time.Now().Add(60 * time.Second))
+	// Bound only the request read so stalled/half-open clients and health
+	// probes can't pin a goroutine. Do NOT put a deadline across Handle():
+	// it runs the real `gh`, which can legitimately take far longer than any
+	// fixed timeout (auth device flow, large project queries, slow network).
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 
 	var req protocol.Request
 	if err := protocol.ReadMessage(conn, &req); err != nil {
@@ -152,16 +156,20 @@ func (s *Server) handleConn(conn net.Conn) {
 		}
 		return
 	}
+	conn.SetReadDeadline(time.Time{}) // clear — Handle() may run a long gh command
 
 	resp := s.handler.Handle(&req)
 
 	// Check for shutdown request
 	if req.Type == protocol.TypeShutdown {
+		conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		protocol.WriteMessage(conn, resp)
 		go s.Shutdown()
 		return
 	}
 
+	// Fresh write deadline measured from now, after Handle() has finished.
+	conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
 	if err := protocol.WriteMessage(conn, resp); err != nil {
 		log.Printf("write response: %v", err)
 	}
