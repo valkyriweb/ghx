@@ -107,7 +107,7 @@ jobs:
 
           cat > ghx.rb << FORMULA
           class Ghx < Formula
-            desc "GitHub CLI Cache Proxy — caching daemon for gh to prevent API rate limiting (valkyriweb fork)"
+            desc "Caching proxy daemon for the GitHub CLI (valkyriweb fork)"
             homepage "https://github.com/${{ github.repository }}"
             version "${VERSION_NUM}"
             license "MIT"
@@ -135,14 +135,21 @@ jobs:
             def install
               bin.install "ghx"
               bin.install "ghxd"
+              bin.install "gh" unless real_gh_on_path?
+            end
 
-              # Install the packaged gh shim unless a real (non-shim) gh CLI exists
-              real_gh = ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).any? do |dir|
+            # True when a real gh (not our shim) is already on PATH, so we skip the shim.
+            def real_gh_on_path?
+              ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).any? do |dir|
                 p = File.join(dir, "gh")
-                next unless File.executable?(p)
-                !(File.binread(p, 512).include?("ghx-shim") rescue false)
+                next false unless File.executable?(p)
+
+                begin
+                  File.binread(p, 512).exclude?("ghx-shim")
+                rescue
+                  false
+                end
               end
-              bin.install "gh" unless real_gh
             end
 
             def caveats
