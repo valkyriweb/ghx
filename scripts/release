@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# scripts/release — cut a fork release of ghx and update the Homebrew tap.
+#
+# Usage:  ./scripts/release v1.6.1
+#
+# Builds darwin/linux (amd64+arm64) binaries, publishes a GitHub release on the
+# fork (valkyriweb/ghx), then regenerates valkyriweb/homebrew-tap Formula/ghx.rb
+# with the new version + checksums. Requires: gh (authenticated), go, git.
+#
+# Deterministic, local build — the CI release workflow is kept disabled so it
+# can't re-upload differently-compiled binaries (sha mismatch). Re-enable CI
+# only after setting the HOMEBREW_TAP_TOKEN repo secret; see UPSTREAM.md.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+VERSION="${1:-}"
+case "$VERSION" in
+  v[0-9]*) ;;
+  *) echo "usage: $0 vX.Y.Z" >&2; exit 1 ;;
+esac
+VERSION_NUM="${VERSION#v}"
+
+REPO="valkyriweb/ghx"
+TAP_REPO="valkyriweb/homebrew-tap"
+PLATFORMS=(darwin/arm64 darwin/amd64 linux/amd64 linux/arm64)
+
+# --- preflight -------------------------------------------------------------
+[ -z "$(git status --porcelain)" ] || { echo "working tree dirty; commit or stash first" >&2; exit 1; }
+git rev-parse "$VERSION" >/dev/null 2>&1 && { echo "tag $VERSION already exists" >&2; exit 1; }
+
+./scripts/verify
+
+# --- build -----------------------------------------------------------------
+LDFLAGS="-s -w -X main.version=${VERSION}"
+rm -rf dist && mkdir -p dist
+for platform in "${PLATFORMS[@]}"; do
+  GOOS="${platform%/*}"; GOARCH="${platform#*/}"
+  out="dist/ghx-${GOOS}-${GOARCH}"; mkdir -p "$out"
+  echo "==> build ${GOOS}/${GOARCH}"
+  GOOS="$GOOS" GOARCH="$GOARCH" go build -ldflags "$LDFLAGS" -o "$out/ghx"  ./src/cmd/ghx
+  GOOS="$GOOS" GOARCH="$GOARCH" go build -ldflags "$LDFLAGS" -o "$out/ghxd" ./src/cmd/ghxd
+  printf '#!/bin/sh\n# ghx-shim: this script redirects gh commands through ghx for caching\nexec ghx "$@"\n' > "$out/gh"
+  chmod +x "$out/gh"
+  tar -czf "dist/ghx-${GOOS}-${GOARCH}.tar.gz" -C "$out" ghx ghxd gh
+done
+( cd dist && shasum -a 256 *.tar.gz | tee checksums.txt )
+
+sha() { awk -v f="ghx-$1.tar.gz" '$2==f{print $1}' dist/checksums.txt; }
+SHA_DARWIN_ARM64="$(sha darwin-arm64)"
+SHA_DARWIN_AMD64="$(sha darwin-amd64)"
+SHA_LINUX_AMD64="$(sha linux-amd64)"
+SHA_LINUX_ARM64="$(sha linux-arm64)"
+
+# --- tag + release ---------------------------------------------------------
+git tag -a "$VERSION" -m "$VERSION"
+gh release create "$VERSION" dist/*.tar.gz dist/checksums.txt \
+  --repo "$REPO" --title "$VERSION" --generate-notes
+
+# --- update homebrew tap ---------------------------------------------------
+BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
+tapdir="$(mktemp -d)"
+gh repo clone "$TAP_REPO" "$tapdir" -- -q
+mkdir -p "$tapdir/Formula"
+cat > "$tapdir/Formula/ghx.rb" << FORMULA
+class Ghx < Formula
+  desc "Caching proxy daemon for the GitHub CLI (valkyriweb fork)"
+  homepage "https://github.com/${REPO}"
+  version "${VERSION_NUM}"
+  license "MIT"
+
+  on_macos do
+    if Hardware::CPU.arm?
+      url "${BASE_URL}/ghx-darwin-arm64.tar.gz"
+      sha256 "${SHA_DARWIN_ARM64}"
+    else
+      url "${BASE_URL}/ghx-darwin-amd64.tar.gz"
+      sha256 "${SHA_DARWIN_AMD64}"
+    end
+  end
+
+  on_linux do
+    if Hardware::CPU.arm?
+      url "${BASE_URL}/ghx-linux-arm64.tar.gz"
+      sha256 "${SHA_LINUX_ARM64}"
+    else
+      url "${BASE_URL}/ghx-linux-amd64.tar.gz"
+      sha256 "${SHA_LINUX_AMD64}"
+    end
+  end
+
+  def install
+    bin.install "ghx"
+    bin.install "ghxd"
+    bin.install "gh" unless real_gh_on_path?
+  end
+
+  # True when a real gh (not our shim) is already on PATH, so we skip the shim.
+  def real_gh_on_path?
+    ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).any? do |dir|
+      p = File.join(dir, "gh")
+      next false unless File.executable?(p)
+
+      begin
+        File.binread(p, 512).exclude?("ghx-shim")
+      rescue
+        false
+      end
+    end
+  end
+
+  def caveats
+    <<~EOS
+      ghx caches GitHub CLI calls to prevent API rate limiting.
+      Use 'ghx' instead of 'gh' to benefit from caching.
+    EOS
+  end
+
+  test do
+    assert_match "ghxd", shell_output("#{bin}/ghxd --help")
+  end
+end
+FORMULA
+
+git -C "$tapdir" add Formula/ghx.rb
+git -C "$tapdir" commit -qm "ghx ${VERSION_NUM}"
+git -C "$tapdir" push -q
+
+git push origin "$VERSION"
+
+cat <<EOF
+
+Released ${VERSION}.
+  Release: https://github.com/${REPO}/releases/tag/${VERSION}
+  Tap:     https://github.com/${TAP_REPO}
+
+Upgrade the fleet:
+  macOS:   brew update && brew upgrade valkyriweb/tap/ghx
+  Ubuntu:  curl -fsSL ${BASE_URL}/ghx-linux-amd64.tar.gz | tar -xz -C /tmp \\
+             && sudo install -m755 /tmp/{ghx,ghxd,gh} /usr/local/bin/ && hash -r
+  k8s:     bump GHX_VERSION in the runtime Dockerfiles (see ghx-rollout docs)
+EOF

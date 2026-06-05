@@ -7,7 +7,14 @@ build:
 test:
 	go test ./...
 
-clean:
-	rm -rf bin/
+verify:
+	./scripts/verify
 
-.PHONY: all build test clean
+release:
+	@test -n "$(VERSION)" || { echo "usage: make release VERSION=vX.Y.Z"; exit 1; }
+	./scripts/release $(VERSION)
+
+clean:
+	rm -rf bin/ dist/
+
+.PHONY: all build test verify release clean
