@@ -50,6 +50,37 @@ func execDirect(ghPath string, args []string) {
 	os.Exit(0)
 }
 
+// processAlive reports whether a process with the given PID currently exists.
+// On Windows, os.FindProcess opens a real handle and fails for unknown PIDs.
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	_ = p
+	return true
+}
+
+// terminateProcess stops a process. Windows has no SIGTERM, so this is a hard kill.
+func terminateProcess(pid int) error {
+	if pid <= 0 {
+		return nil
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return p.Kill()
+}
+
+// killProcess forcibly terminates a process.
+func killProcess(pid int) error {
+	return terminateProcess(pid)
+}
+
 // execReplace emulates exec-replace on Windows by running the command and exiting.
 func execReplace(path string, argv []string, env []string) {
 	cmd := exec.Command(path, argv[1:]...)

@@ -64,6 +64,11 @@ func main() {
 
 	srv := daemon.NewServer(cfg, version, resolved)
 	if err := srv.Run(); err != nil {
+		if daemon.IsAlreadyRunning(err) {
+			// Lost a benign start race with another daemon — exit quietly.
+			log.Printf("%v; exiting", err)
+			os.Exit(0)
+		}
 		log.Fatalf("fatal: %v", err)
 	}
 }

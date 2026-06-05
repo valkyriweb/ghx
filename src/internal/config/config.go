@@ -14,6 +14,7 @@ type Config struct {
 	MaxCacheEntries int                      `yaml:"max_cache_entries"`
 	SocketPath      string                   `yaml:"socket_path"`
 	PIDFile         string                   `yaml:"pid_file"`
+	LockFile        string                   `yaml:"lock_file"`
 	AutoStart       bool                     `yaml:"auto_start"`
 	AdditionalCache []string                 `yaml:"additional_cacheable"`
 	DashboardPort   int                      `yaml:"dashboard_port"`
@@ -29,6 +30,7 @@ func DefaultConfig() *Config {
 		MaxCacheEntries: 1000,
 		SocketPath:      defaultSocketPath(ghxDir),
 		PIDFile:         filepath.Join(ghxDir, "ghxd.pid"),
+		LockFile:        filepath.Join(ghxDir, "ghxd.lock"),
 		AutoStart:       true,
 		DashboardPort:   9847,
 		GHPath:          "gh",

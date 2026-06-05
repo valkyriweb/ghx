@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -22,6 +23,16 @@ import (
 	"github.com/brunoborges/ghx/src/internal/metrics"
 	"github.com/brunoborges/ghx/src/internal/protocol"
 )
+
+// errDaemonAlreadyRunning is returned when another daemon already owns the
+// singleton lock or socket. ghxd treats it as a clean no-op exit, not a crash.
+var errDaemonAlreadyRunning = errors.New("ghxd: another daemon is already running")
+
+// IsAlreadyRunning reports whether err indicates that another daemon already
+// owns the singleton lock or socket (a benign start race, not a failure).
+func IsAlreadyRunning(err error) bool {
+	return errors.Is(err, errDaemonAlreadyRunning)
+}
 
 // ghPathRefreshInterval is how often the daemon re-resolves the gh binary path.
 // This ensures the daemon picks up gh upgrades without requiring a restart.
@@ -64,6 +75,22 @@ func (s *Server) Run() error {
 	socketDir := filepath.Dir(s.cfg.SocketPath)
 	if err := os.MkdirAll(socketDir, 0700); err != nil {
 		return fmt.Errorf("create socket dir: %w", err)
+	}
+
+	// Singleton lock: refuse to start if another daemon already holds it. The
+	// OS releases the lock on exit/crash, so there is no stale-lock hazard. This
+	// closes the bind race where two daemons start concurrently and the second
+	// unlinks the first's socket, orphaning it (still holding TCP :dashboard).
+	release, err := acquireSingletonLock(s.cfg.LockFile)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	// Guard against stealing a live socket: only remove it if nothing answers.
+	if conn, derr := net.DialTimeout("unix", s.cfg.SocketPath, 200*time.Millisecond); derr == nil {
+		conn.Close()
+		return errDaemonAlreadyRunning
 	}
 
 	// Remove stale socket (no-op on Windows)

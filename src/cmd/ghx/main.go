@@ -209,17 +209,11 @@ func handleDaemon(cfg *config.Config, args []string) {
 		handleDaemonStart(cfg, args[1:])
 
 	case "stop":
-		cl := client.New(cfg.SocketPath)
-		if !cl.IsRunning() {
+		if reapDaemon(cfg) {
+			fmt.Println("ghx: daemon stopped")
+		} else {
 			fmt.Println("ghx: daemon is not running")
-			return
 		}
-		resp, err := cl.Send(&protocol.Request{Type: protocol.TypeShutdown})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "ghx: stop failed: %v\n", err)
-			os.Exit(1)
-		}
-		os.Stdout.Write(resp.Stdout)
 
 	case "status":
 		cl := client.New(cfg.SocketPath)
@@ -235,8 +229,7 @@ func handleDaemon(cfg *config.Config, args []string) {
 		printFormattedStats(resp.Stdout)
 
 	case "restart":
-		handleDaemon(cfg, []string{"stop"})
-		time.Sleep(500 * time.Millisecond)
+		reapDaemon(cfg) // blocks until the old daemon is gone and files are cleared
 		handleDaemon(cfg, []string{"start", "-d"})
 
 	default:
@@ -245,8 +238,109 @@ func handleDaemon(cfg *config.Config, args []string) {
 	}
 }
 
+// readPIDFile returns the daemon PID recorded on disk, or 0 if unavailable.
+func readPIDFile(cfg *config.Config) int {
+	data, err := os.ReadFile(cfg.PIDFile)
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0
+	}
+	return pid
+}
+
+// cleanupDaemonFiles removes the socket and PID files left behind by a daemon.
+func cleanupDaemonFiles(cfg *config.Config) {
+	os.Remove(cfg.SocketPath)
+	os.Remove(cfg.PIDFile)
+}
+
+// daemonGone reports whether the daemon has fully stopped: not listening on its
+// socket and the recorded PID no longer exists.
+func daemonGone(cl *client.Client, pid int) bool {
+	return !cl.IsRunning() && (pid <= 0 || !processAlive(pid))
+}
+
+// waitGone polls until the daemon is fully gone or the timeout elapses.
+func waitGone(cl *client.Client, pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if daemonGone(cl, pid) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// reapDaemon stops a running daemon robustly and clears stale state. It escalates
+// graceful shutdown -> SIGTERM -> SIGKILL so a wedged daemon can't survive, then
+// removes the socket and PID files so a fresh start can bind. Returns true if a
+// daemon was found running (or its PID was alive), false if nothing was running.
+func reapDaemon(cfg *config.Config) bool {
+	cl := client.New(cfg.SocketPath)
+	pid := readPIDFile(cfg)
+	found := cl.IsRunning() || processAlive(pid)
+
+	if !found {
+		cleanupDaemonFiles(cfg) // clear any stale socket/PID left by a crash
+		return false
+	}
+
+	// 1. Graceful shutdown via the socket, bounded so a wedged daemon (accepts
+	//    connections but never replies) can't block us for the client's full
+	//    60s read deadline.
+	if cl.IsRunning() {
+		done := make(chan struct{})
+		go func() {
+			_, _ = cl.Send(&protocol.Request{Type: protocol.TypeShutdown})
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+		if waitGone(cl, pid, 3*time.Second) {
+			cleanupDaemonFiles(cfg)
+			return true
+		}
+	}
+
+	// 2. SIGTERM the recorded PID.
+	if processAlive(pid) {
+		_ = terminateProcess(pid)
+		if waitGone(cl, pid, 2*time.Second) {
+			cleanupDaemonFiles(cfg)
+			return true
+		}
+	}
+
+	// 3. SIGKILL — last resort for a wedged daemon that ignores SIGTERM.
+	if processAlive(pid) {
+		_ = killProcess(pid)
+		waitGone(cl, pid, 2*time.Second)
+	}
+
+	cleanupDaemonFiles(cfg)
+	return true
+}
+
 func handleDaemonStart(cfg *config.Config, args []string) {
 	if isDetachMode(args) {
+		// Refuse to spawn a second daemon, and clear stale socket/PID files left
+		// by a crashed daemon so the new one can bind.
+		cl := client.New(cfg.SocketPath)
+		if cl.IsRunning() {
+			fmt.Println("ghx: daemon already running")
+			return
+		}
+		if pid := readPIDFile(cfg); !processAlive(pid) {
+			cleanupDaemonFiles(cfg)
+		}
 		if err := startDaemon(cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "ghx: failed to start daemon: %v\n", err)
 			os.Exit(1)
