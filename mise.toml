@@ -1,0 +1,3 @@
+# Pinned toolchain for ghx. `mise install` reproduces it.
+[tools]
+go = "1.26"
