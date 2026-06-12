@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
 
@@ -55,14 +56,18 @@ func TestReapDaemonNothingRunning(t *testing.T) {
 	cfg := tmpCfg(t)
 	// Stale files pointing at a dead PID — reap should clear them and report
 	// nothing was running.
-	os.WriteFile(cfg.SocketPath, []byte{}, 0600)
+	if runtime.GOOS != "windows" {
+		os.WriteFile(cfg.SocketPath, []byte{}, 0600)
+	}
 	os.WriteFile(cfg.PIDFile, []byte(strconv.Itoa(0x7FFFFFF0)), 0600)
 
 	if reapDaemon(cfg) {
 		t.Fatal("reapDaemon should report false when no live daemon exists")
 	}
-	if _, err := os.Stat(cfg.SocketPath); !os.IsNotExist(err) {
-		t.Fatal("stale socket file should be removed")
+	if runtime.GOOS != "windows" {
+		if _, err := os.Stat(cfg.SocketPath); !os.IsNotExist(err) {
+			t.Fatal("stale socket file should be removed")
+		}
 	}
 	if _, err := os.Stat(cfg.PIDFile); !os.IsNotExist(err) {
 		t.Fatal("stale PID file should be removed")
