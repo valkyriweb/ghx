@@ -20,8 +20,8 @@ type Request struct {
 	// WorkDir is the client's working directory, so gh runs in the correct location.
 	WorkDir string `json:"work_dir,omitempty"`
 
-	// Env is the client's process environment. The daemon forwards it to the gh
-	// subprocess so per-call auth variables like GH_TOKEN are honored.
+	// Env is the filtered client environment forwarded to the gh subprocess so
+	// per-call auth/context variables like GH_TOKEN and GH_HOST are honored.
 	Env []string `json:"env,omitempty"`
 
 	// NoCache skips cache lookup for this request.

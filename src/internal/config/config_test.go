@@ -54,7 +54,7 @@ func TestLoadAppliesEnvOverridesWithoutConfigFile(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 	t.Setenv("LOCALAPPDATA", tmp)
-	t.Setenv("GHX_TTL", "42s")
+	t.Setenv("GHX_TTL", "1m")
 	t.Setenv("GHX_SOCKET", "/tmp/custom-ghx.sock")
 	t.Setenv("GHX_GH_PATH", "/tmp/custom-gh")
 
@@ -62,8 +62,8 @@ func TestLoadAppliesEnvOverridesWithoutConfigFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() returned error: %v", err)
 	}
-	if cfg.TTL.String() != "42s" {
-		t.Fatalf("TTL = %v, want 42s", cfg.TTL)
+	if cfg.TTL.String() != "1m0s" {
+		t.Fatalf("TTL = %v, want 1m0s", cfg.TTL)
 	}
 	if cfg.SocketPath != "/tmp/custom-ghx.sock" {
 		t.Fatalf("SocketPath = %q, want env override", cfg.SocketPath)

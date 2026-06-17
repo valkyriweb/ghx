@@ -88,7 +88,7 @@ func main() {
 		Args:        ghArgs,
 		Context:     ctx,
 		WorkDir:     workDir,
-		Env:         os.Environ(),
+		Env:         daemonRequestEnv(os.Environ()),
 		NoCache:     noCache,
 		TTLOverride: ttlOverride,
 	}
@@ -148,6 +148,24 @@ func printHelp(cfg *config.Config) {
 	fmt.Println("All other arguments are forwarded to gh via the caching daemon.")
 	fmt.Printf("Config: ~/.ghx/\n")
 	fmt.Printf("Dashboard: http://127.0.0.1:%d/\n", cfg.DashboardPort)
+}
+
+func daemonRequestEnv(env []string) []string {
+	allowed := map[string]bool{
+		"GH_TOKEN":      true,
+		"GITHUB_TOKEN":  true,
+		"GH_HOST":       true,
+		"GH_REPO":       true,
+		"GH_CONFIG_DIR": true,
+	}
+	filtered := make([]string, 0, len(allowed))
+	for _, entry := range env {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && allowed[key] {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
 }
 
 // parseGHXFlags extracts ghx-specific flags from the argument list.

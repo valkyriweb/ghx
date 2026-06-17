@@ -62,9 +62,9 @@ func Load() (*Config, error) {
 
 func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("GHX_TTL"); v != "" {
-		if d, err := time.ParseDuration(v + "s"); err == nil {
+		if d, err := time.ParseDuration(v); err == nil {
 			cfg.TTL = d
-		} else if d, err := time.ParseDuration(v); err == nil {
+		} else if d, err := time.ParseDuration(v + "s"); err == nil {
 			cfg.TTL = d
 		}
 	}
