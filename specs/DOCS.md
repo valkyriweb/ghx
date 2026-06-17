@@ -254,6 +254,12 @@ Each cached response is stored under a SHA-256 key computed from:
 - **Auth token hash** — SHA-256 fingerprint of your token (the token itself is never stored)
 - **Full command arguments** — every argument and flag, in order
 
+The client forwards its process environment to the daemon for each request, so
+`gh` subprocesses see per-call auth variables such as `GH_TOKEN`, `GITHUB_TOKEN`,
+and `GH_HOST` instead of inheriting whatever environment the daemon had when it
+started. Environment values are used only for the subprocess call; cache entries
+store the token fingerprint, not the token.
+
 This means the **same command with different flags produces different cache entries**:
 
 ```bash
@@ -525,6 +531,7 @@ additional_cacheable:
 ## Security
 
 - Unix socket with `0600` permissions (owner-only access)
+- Client environment is forwarded per request so `gh` honors per-call auth tokens
 - Auth tokens are never stored — only a SHA256 fingerprint is used in cache keys
 - Dashboard binds to `127.0.0.1` only (not accessible from network)
 - In-memory cache only (lost on daemon restart)

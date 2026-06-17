@@ -2,6 +2,15 @@
 
 Fork of `brunoborges/ghx`. See `UPSTREAM.md` for provenance.
 
+## Unreleased
+
+### Fixed
+- Forward the client process environment to daemon-executed `gh` subprocesses,
+  so per-call auth like `GH_TOKEN`/`GITHUB_TOKEN` is honored by a long-lived
+  daemon instead of inheriting the daemon's startup identity.
+- Apply `GHX_TTL`, `GHX_SOCKET`, and `GHX_GH_PATH` overrides even when
+  `~/.ghx/config.yaml` does not exist.
+
 ## v1.6.0 — 2026-06-05
 
 First fork release. Based on upstream `main` @ `7d70f48` (post-v1.5.2 `src/`

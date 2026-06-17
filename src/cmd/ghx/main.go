@@ -88,6 +88,7 @@ func main() {
 		Args:        ghArgs,
 		Context:     ctx,
 		WorkDir:     workDir,
+		Env:         os.Environ(),
 		NoCache:     noCache,
 		TTLOverride: ttlOverride,
 	}
