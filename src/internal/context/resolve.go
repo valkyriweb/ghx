@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // ExecContext holds resolved execution context for building cache keys.
@@ -20,12 +23,8 @@ type ExecContext struct {
 func Resolve(ghPath string) ExecContext {
 	ctx := ExecContext{}
 
-	// Host: GH_HOST env var or default
-	if host := os.Getenv("GH_HOST"); host != "" {
-		ctx.Host = host
-	} else {
-		ctx.Host = "github.com"
-	}
+	// Host: GH_HOST env var or default from gh config.
+	ctx.Host = resolveHost()
 
 	// Repo: GH_REPO env var or from git remote
 	if repo := os.Getenv("GH_REPO"); repo != "" {
@@ -41,6 +40,47 @@ func Resolve(ghPath string) ExecContext {
 	ctx.TokenHash = resolveTokenHash(ghPath, ctx.Host)
 
 	return ctx
+}
+
+func resolveHost() string {
+	if host := os.Getenv("GH_HOST"); host != "" {
+		return host
+	}
+	if host := resolveHostFromGHConfig(); host != "" {
+		return host
+	}
+	return "github.com"
+}
+
+func resolveHostFromGHConfig() string {
+	configDir := os.Getenv("GH_CONFIG_DIR")
+	if configDir == "" {
+		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+			configDir = filepath.Join(xdg, "gh")
+		} else if home := os.Getenv("HOME"); home != "" {
+			configDir = filepath.Join(home, ".config", "gh")
+		}
+	}
+	if configDir == "" {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(configDir, "hosts.yml"))
+	if err != nil {
+		return ""
+	}
+	hosts := map[string]any{}
+	if err := yaml.Unmarshal(data, &hosts); err != nil {
+		return ""
+	}
+	if _, ok := hosts["github.com"]; ok {
+		return "github.com"
+	}
+	if len(hosts) == 1 {
+		for host := range hosts {
+			return host
+		}
+	}
+	return ""
 }
 
 func resolveRepoFromGit() string {
