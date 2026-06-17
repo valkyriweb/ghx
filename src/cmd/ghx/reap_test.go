@@ -3,8 +3,10 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/brunoborges/ghx/src/internal/client"
 	"github.com/brunoborges/ghx/src/internal/config"
@@ -13,8 +15,12 @@ import (
 func tmpCfg(t *testing.T) *config.Config {
 	t.Helper()
 	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "ghxd.sock")
+	if runtime.GOOS == "windows" {
+		socketPath = `\\.\pipe\ghx-test-` + strconv.FormatInt(time.Now().UnixNano(), 10)
+	}
 	return &config.Config{
-		SocketPath: filepath.Join(dir, "ghxd.sock"),
+		SocketPath: socketPath,
 		PIDFile:    filepath.Join(dir, "ghxd.pid"),
 	}
 }
@@ -61,8 +67,10 @@ func TestReapDaemonNothingRunning(t *testing.T) {
 	if reapDaemon(cfg) {
 		t.Fatal("reapDaemon should report false when no live daemon exists")
 	}
-	if _, err := os.Stat(cfg.SocketPath); !os.IsNotExist(err) {
-		t.Fatal("stale socket file should be removed")
+	if runtime.GOOS != "windows" {
+		if _, err := os.Stat(cfg.SocketPath); !os.IsNotExist(err) {
+			t.Fatal("stale socket file should be removed")
+		}
 	}
 	if _, err := os.Stat(cfg.PIDFile); !os.IsNotExist(err) {
 		t.Fatal("stale PID file should be removed")
