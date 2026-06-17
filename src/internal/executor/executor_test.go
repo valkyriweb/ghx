@@ -49,6 +49,24 @@ func TestExecute_EmptyWorkDir(t *testing.T) {
 	}
 }
 
+func TestOverlayRequestEnvKeepsBaselineAndScrubsAuth(t *testing.T) {
+	env := overlayRequestEnv(
+		[]string{"HOME=/home/daemon", "PATH=/usr/bin", "GH_TOKEN=daemon-token", "GH_HOST=daemon.example.com"},
+		[]string{"GH_TOKEN=client-token", "GH_REPO=owner/repo"},
+	)
+
+	joined := strings.Join(env, "\n")
+	if !strings.Contains(joined, "HOME=/home/daemon") || !strings.Contains(joined, "PATH=/usr/bin") {
+		t.Fatalf("expected baseline env to be preserved, got %#v", env)
+	}
+	if strings.Contains(joined, "daemon-token") || strings.Contains(joined, "daemon.example.com") {
+		t.Fatalf("expected daemon auth/context env to be scrubbed, got %#v", env)
+	}
+	if !strings.Contains(joined, "GH_TOKEN=client-token") || !strings.Contains(joined, "GH_REPO=owner/repo") {
+		t.Fatalf("expected request auth/context env to be appended, got %#v", env)
+	}
+}
+
 func TestExecute_UsesProvidedEnv(t *testing.T) {
 	result := Execute(
 		context.Background(),

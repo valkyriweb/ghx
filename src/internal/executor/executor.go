@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -21,7 +22,8 @@ type Result struct {
 
 // Execute runs a gh command with the given arguments and returns its output.
 // If workDir is non-empty and absolute, the command runs in that directory.
-// If env is non-nil, the subprocess uses that environment instead of the daemon's.
+// If env is non-nil, the subprocess overlays that request environment onto the
+// daemon's baseline environment after removing auth/context variables.
 func Execute(ctx context.Context, ghPath string, args []string, workDir string, env []string) *Result {
 	start := time.Now()
 
@@ -30,7 +32,7 @@ func Execute(ctx context.Context, ghPath string, args []string, workDir string, 
 		cmd.Dir = workDir
 	}
 	if env != nil {
-		cmd.Env = env
+		cmd.Env = overlayRequestEnv(os.Environ(), env)
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -55,6 +57,26 @@ func Execute(ctx context.Context, ghPath string, args []string, workDir string, 
 	}
 
 	return result
+}
+
+func overlayRequestEnv(base []string, request []string) []string {
+	scrub := map[string]bool{
+		"GH_TOKEN":      true,
+		"GITHUB_TOKEN":  true,
+		"GH_HOST":       true,
+		"GH_REPO":       true,
+		"GH_CONFIG_DIR": true,
+	}
+	merged := make([]string, 0, len(base)+len(request))
+	for _, entry := range base {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && scrub[key] {
+			continue
+		}
+		merged = append(merged, entry)
+	}
+	merged = append(merged, request...)
+	return merged
 }
 
 // IsBinaryNotFound reports whether the given gh binary path cannot be found or resolved.
