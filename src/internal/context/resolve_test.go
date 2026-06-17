@@ -14,27 +14,41 @@ func TestResolveHostUsesGHHost(t *testing.T) {
 	}
 }
 
-func TestResolveHostUsesSingleGHConfigHost(t *testing.T) {
+func TestResolveHostFromGHConfigUsesSingleHost(t *testing.T) {
 	configDir := t.TempDir()
 	t.Setenv("GH_CONFIG_DIR", configDir)
 	if err := os.WriteFile(filepath.Join(configDir, "hosts.yml"), []byte("ghe.example.com:\n  oauth_token: redacted\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	if got := resolveHost(); got != "ghe.example.com" {
-		t.Fatalf("resolveHost() = %q, want ghe.example.com", got)
+	if got := resolveHostFromGHConfig(); got != "ghe.example.com" {
+		t.Fatalf("resolveHostFromGHConfig() = %q, want ghe.example.com", got)
 	}
 }
 
-func TestResolveHostPrefersGitHubDotComWhenConfigured(t *testing.T) {
+func TestParseHostFromURL(t *testing.T) {
+	cases := map[string]string{
+		"git@ghe.example.com:owner/repo.git":       "ghe.example.com",
+		"ssh://git@ghe.example.com/owner/repo.git": "ghe.example.com",
+		"https://ghe.example.com/owner/repo.git":   "ghe.example.com",
+		"https://github.com/owner/repo.git":        "github.com",
+	}
+	for input, want := range cases {
+		if got := parseHostFromURL(input); got != want {
+			t.Fatalf("parseHostFromURL(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestResolveHostFromGHConfigPrefersGitHubDotComWhenConfigured(t *testing.T) {
 	configDir := t.TempDir()
 	t.Setenv("GH_CONFIG_DIR", configDir)
 	if err := os.WriteFile(filepath.Join(configDir, "hosts.yml"), []byte("ghe.example.com:\n  oauth_token: redacted\ngithub.com:\n  oauth_token: redacted\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	if got := resolveHost(); got != "github.com" {
-		t.Fatalf("resolveHost() = %q, want github.com", got)
+	if got := resolveHostFromGHConfig(); got != "github.com" {
+		t.Fatalf("resolveHostFromGHConfig() = %q, want github.com", got)
 	}
 }
 

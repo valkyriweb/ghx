@@ -46,10 +46,46 @@ func resolveHost() string {
 	if host := os.Getenv("GH_HOST"); host != "" {
 		return host
 	}
+	if host := resolveHostFromGit(); host != "" {
+		return host
+	}
 	if host := resolveHostFromGHConfig(); host != "" {
 		return host
 	}
 	return "github.com"
+}
+
+func resolveHostFromGit() string {
+	out, err := exec.Command("git", "remote", "get-url", "origin").Output()
+	if err != nil {
+		return ""
+	}
+	return parseHostFromURL(strings.TrimSpace(string(out)))
+}
+
+func parseHostFromURL(url string) string {
+	if strings.HasPrefix(url, "git@") {
+		withoutPrefix := strings.TrimPrefix(url, "git@")
+		if idx := strings.Index(withoutPrefix, ":"); idx != -1 {
+			return withoutPrefix[:idx]
+		}
+	}
+	if strings.HasPrefix(url, "ssh://git@") {
+		withoutPrefix := strings.TrimPrefix(url, "ssh://git@")
+		if idx := strings.Index(withoutPrefix, "/"); idx != -1 {
+			return withoutPrefix[:idx]
+		}
+	}
+	for _, prefix := range []string{"https://", "http://"} {
+		if strings.HasPrefix(url, prefix) {
+			withoutPrefix := strings.TrimPrefix(url, prefix)
+			if idx := strings.Index(withoutPrefix, "/"); idx != -1 {
+				return withoutPrefix[:idx]
+			}
+			return withoutPrefix
+		}
+	}
+	return ""
 }
 
 func resolveHostFromGHConfig() string {
