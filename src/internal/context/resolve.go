@@ -81,6 +81,10 @@ func resolveCurrentBranch() string {
 }
 
 func resolveTokenHash(ghPath, host string) string {
+	if token := envTokenForHost(host); token != "" {
+		return hashToken(token)
+	}
+
 	cmd := exec.Command(ghPath, "auth", "token", "--hostname", host)
 	out, err := cmd.Output()
 	if err != nil {
@@ -90,6 +94,28 @@ func resolveTokenHash(ghPath, host string) string {
 	if token == "" {
 		return ""
 	}
+	return hashToken(token)
+}
+
+func envTokenForHost(host string) string {
+	if host != "" && host != "github.com" {
+		if token := os.Getenv("GH_ENTERPRISE_TOKEN"); token != "" {
+			return token
+		}
+		if token := os.Getenv("GITHUB_ENTERPRISE_TOKEN"); token != "" {
+			return token
+		}
+	}
+	if token := os.Getenv("GH_TOKEN"); token != "" {
+		return token
+	}
+	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
+		return token
+	}
+	return ""
+}
+
+func hashToken(token string) string {
 	h := sha256.Sum256([]byte(token))
 	return fmt.Sprintf("%x", h[:8]) // first 8 bytes is enough for keying
 }
