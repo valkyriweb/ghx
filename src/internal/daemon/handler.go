@@ -65,14 +65,14 @@ func (h *Handler) SetGHPath(path string) {
 }
 
 // execGH runs gh and retries once with a re-resolved path if the binary is not found.
-func (h *Handler) execGH(args []string, workDir string) *executor.Result {
+func (h *Handler) execGH(args []string, workDir string, env []string) *executor.Result {
 	ghPath := h.GHPath()
 	if executor.IsBinaryNotFound(ghPath) {
 		if newPath := h.reResolveGHPath(); newPath != "" {
 			ghPath = newPath
 		}
 	}
-	return executor.Execute(context.Background(), ghPath, args, workDir)
+	return executor.Execute(context.Background(), ghPath, args, workDir, env)
 }
 
 // reResolveGHPath attempts to find a new gh binary and updates the stored path.
@@ -118,7 +118,7 @@ func (h *Handler) handleExec(req *protocol.Request) *protocol.Response {
 
 	// Non-cacheable: execute directly via daemon (captures output)
 	if classification.Type == allowlist.Passthrough || req.NoCache {
-		result := h.execGH(req.Args, req.WorkDir)
+		result := h.execGH(req.Args, req.WorkDir, req.Env)
 		latency := time.Since(start).Seconds() * 1000
 		h.stats.Record(cmdKey, "", metrics.ResultPassthrough, latency)
 
@@ -131,7 +131,7 @@ func (h *Handler) handleExec(req *protocol.Request) *protocol.Response {
 
 	// Mutation: execute directly, then invalidate
 	if classification.Type == allowlist.Mutation {
-		result := h.execGH(req.Args, req.WorkDir)
+		result := h.execGH(req.Args, req.WorkDir, req.Env)
 		latency := time.Since(start).Seconds() * 1000
 		h.stats.Record(cmdKey, "", metrics.ResultPassthrough, latency)
 
@@ -210,7 +210,7 @@ func (h *Handler) doSingleflight(key string, req *protocol.Request) (*executor.R
 	h.inflight[key] = c
 	h.mu.Unlock()
 
-	c.res = h.execGH(req.Args, req.WorkDir)
+	c.res = h.execGH(req.Args, req.WorkDir, req.Env)
 	c.wg.Done()
 
 	h.mu.Lock()

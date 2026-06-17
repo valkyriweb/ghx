@@ -1,6 +1,9 @@
 package daemon
 
 import (
+	"fmt"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 
@@ -8,6 +11,7 @@ import (
 	"github.com/brunoborges/ghx/src/internal/cache"
 	"github.com/brunoborges/ghx/src/internal/config"
 	"github.com/brunoborges/ghx/src/internal/metrics"
+	"github.com/brunoborges/ghx/src/internal/protocol"
 )
 
 func TestSanitizeCmdKey(t *testing.T) {
@@ -29,6 +33,36 @@ func TestSanitizeCmdKey(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHandler_ForwardsRequestEnvToGH(t *testing.T) {
+	cfg := &config.Config{GHPath: os.Args[0]}
+	c := cache.New(100)
+	cl := allowlist.NewClassifier(nil)
+	s := metrics.New()
+	h := NewHandler(cfg, c, cl, s)
+
+	resp := h.Handle(&protocol.Request{
+		Type: protocol.TypeExec,
+		Args: []string{"-test.run=TestHandlerEnvHelperProcess", "--"},
+		Env:  append(os.Environ(), "GO_WANT_HANDLER_ENV_HELPER=1", "GHX_HANDLER_ENV=client-token"),
+	})
+
+	if resp.ExitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d: %s", resp.ExitCode, resp.Stderr)
+	}
+	got := strings.TrimSpace(string(resp.Stdout))
+	if got != "client-token" {
+		t.Fatalf("expected gh subprocess to see request env, got %q", got)
+	}
+}
+
+func TestHandlerEnvHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_HANDLER_ENV_HELPER") != "1" {
+		return
+	}
+	fmt.Fprint(os.Stdout, os.Getenv("GHX_HANDLER_ENV"))
+	os.Exit(0)
 }
 
 func TestHandler_GHPath_AtomicAccess(t *testing.T) {

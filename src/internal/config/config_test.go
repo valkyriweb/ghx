@@ -50,6 +50,29 @@ func TestDefaultConfigPIDFile(t *testing.T) {
 	}
 }
 
+func TestLoadAppliesEnvOverridesWithoutConfigFile(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("LOCALAPPDATA", tmp)
+	t.Setenv("GHX_TTL", "1m")
+	t.Setenv("GHX_SOCKET", "/tmp/custom-ghx.sock")
+	t.Setenv("GHX_GH_PATH", "/tmp/custom-gh")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	if cfg.TTL.String() != "1m0s" {
+		t.Fatalf("TTL = %v, want 1m0s", cfg.TTL)
+	}
+	if cfg.SocketPath != "/tmp/custom-ghx.sock" {
+		t.Fatalf("SocketPath = %q, want env override", cfg.SocketPath)
+	}
+	if cfg.GHPath != "/tmp/custom-gh" {
+		t.Fatalf("GHPath = %q, want env override", cfg.GHPath)
+	}
+}
+
 func TestLoadReturnsDefaults(t *testing.T) {
 	cfg, err := Load()
 	if err != nil {

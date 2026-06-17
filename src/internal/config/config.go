@@ -46,6 +46,7 @@ func Load() (*Config, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
+			applyEnvOverrides(cfg)
 			return cfg, nil
 		}
 		return cfg, err
@@ -55,11 +56,15 @@ func Load() (*Config, error) {
 		return cfg, err
 	}
 
-	// Apply env var overrides
+	applyEnvOverrides(cfg)
+	return cfg, nil
+}
+
+func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("GHX_TTL"); v != "" {
-		if d, err := time.ParseDuration(v + "s"); err == nil {
+		if d, err := time.ParseDuration(v); err == nil {
 			cfg.TTL = d
-		} else if d, err := time.ParseDuration(v); err == nil {
+		} else if d, err := time.ParseDuration(v + "s"); err == nil {
 			cfg.TTL = d
 		}
 	}
@@ -69,8 +74,6 @@ func Load() (*Config, error) {
 	if v := os.Getenv("GHX_GH_PATH"); v != "" {
 		cfg.GHPath = v
 	}
-
-	return cfg, nil
 }
 
 // CommandTTL returns the TTL for a specific command, falling back to default.
