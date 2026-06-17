@@ -61,11 +61,13 @@ func Execute(ctx context.Context, ghPath string, args []string, workDir string, 
 
 func overlayRequestEnv(base []string, request []string) []string {
 	scrub := map[string]bool{
-		"GH_TOKEN":      true,
-		"GITHUB_TOKEN":  true,
-		"GH_HOST":       true,
-		"GH_REPO":       true,
-		"GH_CONFIG_DIR": true,
+		"GH_TOKEN":                true,
+		"GITHUB_TOKEN":            true,
+		"GH_ENTERPRISE_TOKEN":     true,
+		"GITHUB_ENTERPRISE_TOKEN": true,
+		"GH_HOST":                 true,
+		"GH_REPO":                 true,
+		"GH_CONFIG_DIR":           true,
 	}
 	merged := make([]string, 0, len(base)+len(request))
 	for _, entry := range base {

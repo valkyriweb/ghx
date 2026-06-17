@@ -152,11 +152,13 @@ func printHelp(cfg *config.Config) {
 
 func daemonRequestEnv(env []string) []string {
 	allowed := map[string]bool{
-		"GH_TOKEN":      true,
-		"GITHUB_TOKEN":  true,
-		"GH_HOST":       true,
-		"GH_REPO":       true,
-		"GH_CONFIG_DIR": true,
+		"GH_TOKEN":                true,
+		"GITHUB_TOKEN":            true,
+		"GH_ENTERPRISE_TOKEN":     true,
+		"GITHUB_ENTERPRISE_TOKEN": true,
+		"GH_HOST":                 true,
+		"GH_REPO":                 true,
+		"GH_CONFIG_DIR":           true,
 	}
 	filtered := make([]string, 0, len(allowed))
 	for _, entry := range env {

@@ -256,8 +256,9 @@ Each cached response is stored under a SHA-256 key computed from:
 
 The client forwards a filtered auth/context environment to the daemon for each
 request, so `gh` subprocesses see per-call values such as `GH_TOKEN`,
-`GITHUB_TOKEN`, `GH_HOST`, `GH_REPO`, and `GH_CONFIG_DIR` instead of inheriting
-whatever environment the daemon had when it started. Only cache-key-relevant auth
+`GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `GH_HOST`,
+`GH_REPO`, and `GH_CONFIG_DIR` instead of inheriting whatever environment the
+daemon had when it started. Only cache-key-relevant auth
 and context variables are forwarded; cache entries store the token fingerprint,
 not the token.
 
