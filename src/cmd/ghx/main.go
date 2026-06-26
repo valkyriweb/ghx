@@ -68,6 +68,13 @@ func main() {
 		return
 	}
 
+	// Bypass long-running watch commands. They are inherently live, not cacheable,
+	// and can legitimately exceed the client/daemon response deadline.
+	if shouldBypassDaemon(ghArgs) {
+		execDirect(cfg.GHPath, ghArgs)
+		return
+	}
+
 	// Resolve execution context
 	ctx := execctx.Resolve(cfg.GHPath)
 
@@ -148,6 +155,13 @@ func printHelp(cfg *config.Config) {
 	fmt.Println("All other arguments are forwarded to gh via the caching daemon.")
 	fmt.Printf("Config: ~/.ghx/\n")
 	fmt.Printf("Dashboard: http://127.0.0.1:%d/\n", cfg.DashboardPort)
+}
+
+func shouldBypassDaemon(args []string) bool {
+	if len(args) >= 2 && args[0] == "run" && args[1] == "watch" {
+		return true
+	}
+	return false
 }
 
 func daemonRequestEnv(env []string) []string {
