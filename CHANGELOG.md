@@ -5,6 +5,15 @@ Fork of `brunoborges/ghx`. See `UPSTREAM.md` for provenance.
 ## Unreleased
 
 ### Fixed
+- Make detached daemon start/restart wait until `ghxd` accepts control requests,
+  preventing `gh xdaemon restart && gh xcache flush` from racing a freshly
+  spawned daemon.
+- Bypass the daemon for all watch-style invocations, including
+  `gh pr checks --watch`, so long-running live status commands do not die on IPC
+  deadlines or get misread as CI/auth failures.
+- Do not cache failed read responses; transient GitHub/API errors such as
+  `HTTP 401: Bad credentials` are retried by the next caller instead of replayed
+  from cache.
 - Forward filtered client auth/context environment to daemon-executed `gh`
   subprocesses, so per-call auth like `GH_TOKEN`/`GITHUB_TOKEN` is honored by a
   long-lived daemon instead of inheriting the daemon's startup identity.

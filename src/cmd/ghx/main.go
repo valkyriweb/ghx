@@ -161,6 +161,11 @@ func shouldBypassDaemon(args []string) bool {
 	if len(args) >= 2 && args[0] == "run" && args[1] == "watch" {
 		return true
 	}
+	for _, arg := range args {
+		if arg == "--watch" || strings.HasPrefix(arg, "--watch=") {
+			return true
+		}
+	}
 	return false
 }
 
@@ -208,11 +213,34 @@ func parseGHXFlags(args []string) (ghArgs []string, noCache bool, ttlOverride in
 	return
 }
 
+type daemonClient interface {
+	IsRunning() bool
+	Send(*protocol.Request) (*protocol.Response, error)
+}
+
+// waitDaemonReady waits until the daemon accepts control requests, not merely
+// until the socket exists. This prevents `gh xdaemon restart && gh xcache flush`
+// from racing the freshly spawned daemon.
+func waitDaemonReady(cl daemonClient, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if cl.IsRunning() {
+			if _, err := cl.Send(&protocol.Request{Type: protocol.TypeStats}); err == nil {
+				return true
+			}
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // ensureDaemon makes sure the daemon is running, auto-starting it if configured.
 // Returns (true, nil) if daemon is ready, (false, nil) if auto-start is disabled,
 // or (false, err) if auto-start failed.
 func ensureDaemon(cfg *config.Config, cl *client.Client) (bool, error) {
-	if cl.IsRunning() {
+	if waitDaemonReady(cl, 500*time.Millisecond) {
 		return true, nil
 	}
 	if !cfg.AutoStart {
@@ -223,12 +251,8 @@ func ensureDaemon(cfg *config.Config, cl *client.Client) (bool, error) {
 		return false, fmt.Errorf("daemon auto-start failed: %v", err)
 	}
 
-	// Wait for daemon to be ready
-	for i := 0; i < 20; i++ {
-		if cl.IsRunning() {
-			return true, nil
-		}
-		time.Sleep(100 * time.Millisecond)
+	if waitDaemonReady(cl, 2*time.Second) {
+		return true, nil
 	}
 	return false, fmt.Errorf("daemon failed to start in time")
 }
@@ -378,6 +402,10 @@ func handleDaemonStart(cfg *config.Config, args []string) {
 		}
 		if err := startDaemon(cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "ghx: failed to start daemon: %v\n", err)
+			os.Exit(1)
+		}
+		if !waitDaemonReady(cl, 2*time.Second) {
+			fmt.Fprintln(os.Stderr, "ghx: daemon started but did not become ready")
 			os.Exit(1)
 		}
 		fmt.Printf("ghx: daemon started (socket: %s, dashboard: http://127.0.0.1:%d/)\n", cfg.SocketPath, cfg.DashboardPort)

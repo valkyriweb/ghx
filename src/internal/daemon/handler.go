@@ -172,23 +172,27 @@ func (h *Handler) handleExec(req *protocol.Request) *protocol.Response {
 		h.stats.Record(cmdKey, cacheKey, metrics.ResultMiss, latency)
 	}
 
-	// Store in cache
-	ttl := h.cfg.CommandTTL(cmdKey)
-	if req.TTLOverride > 0 {
-		ttl = time.Duration(req.TTLOverride) * time.Second
-	}
+	// Store only successful reads. Transient GitHub/API failures such as 401s,
+	// 5xxs, and network errors must be retried by the next caller, not replayed
+	// from cache.
+	if result.ExitCode == 0 {
+		ttl := h.cfg.CommandTTL(cmdKey)
+		if req.TTLOverride > 0 {
+			ttl = time.Duration(req.TTLOverride) * time.Second
+		}
 
-	h.cache.Set(&cache.Entry{
-		Key:      cacheKey,
-		Stdout:   result.Stdout,
-		Stderr:   result.Stderr,
-		ExitCode: result.ExitCode,
-		CachedAt: time.Now(),
-		TTL:      ttl,
-		Resource: classification.Resource,
-		Host:     req.Context.Host,
-		Repo:     req.Context.Repo,
-	})
+		h.cache.Set(&cache.Entry{
+			Key:      cacheKey,
+			Stdout:   result.Stdout,
+			Stderr:   result.Stderr,
+			ExitCode: result.ExitCode,
+			CachedAt: time.Now(),
+			TTL:      ttl,
+			Resource: classification.Resource,
+			Host:     req.Context.Host,
+			Repo:     req.Context.Repo,
+		})
+	}
 
 	return &protocol.Response{
 		Stdout:   result.Stdout,

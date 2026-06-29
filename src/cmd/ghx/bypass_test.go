@@ -2,9 +2,17 @@ package main
 
 import "testing"
 
-func TestShouldBypassDaemonForRunWatch(t *testing.T) {
-	if !shouldBypassDaemon([]string{"run", "watch", "123", "--repo", "owner/repo"}) {
-		t.Fatal("expected gh run watch to bypass daemon")
+func TestShouldBypassDaemonForWatchCommands(t *testing.T) {
+	cases := [][]string{
+		{"run", "watch", "123", "--repo", "owner/repo"},
+		{"pr", "checks", "123", "--watch", "--interval", "30"},
+		{"pr", "checks", "123", "--watch=true"},
+	}
+
+	for _, args := range cases {
+		if !shouldBypassDaemon(args) {
+			t.Fatalf("expected %v to bypass daemon", args)
+		}
 	}
 }
 

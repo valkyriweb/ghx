@@ -114,7 +114,7 @@ The allowlist is configurable — users can add custom commands via `additional_
 
 - Any mutating command (`create`, `edit`, `delete`, `merge`, `close`, `reopen`, `comment`, `review`)
 - Interactive commands (anything that prompts for input or launches a browser)
-- Streaming commands (`gh run watch`, `gh codespace ssh`)
+- Streaming/watch commands (`gh run watch`, any command with `--watch`, `gh codespace ssh`)
 - Auth commands (`gh auth`)
 - `gh api` with methods other than GET (unless explicitly opted in for read-only GraphQL)
 
@@ -417,7 +417,7 @@ Staleness checks only apply to the managed binary. If `gh` was found in PATH or 
 ## Error Handling
 
 - **Daemon unavailable**: Auto-start the daemon, then retry. If auto-start itself fails (e.g., socket conflict, permissions), fall back to executing `gh` directly (never block the user)
-- **`gh` execution error**: Cache the error response too (exit code, stderr) for the TTL duration to avoid hammering a failing endpoint
+- **`gh` execution error**: Return the error response to the caller, but do not cache it; the next caller should retry transient API/auth/network failures
 - **Socket timeout**: 5-second timeout on client→daemon communication; fall back to direct `gh` on timeout
 - **Cache corruption**: In-memory only, so restart the daemon to clear
 

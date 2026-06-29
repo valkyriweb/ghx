@@ -6,10 +6,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/brunoborges/ghx/src/internal/allowlist"
 	"github.com/brunoborges/ghx/src/internal/cache"
 	"github.com/brunoborges/ghx/src/internal/config"
+	execctx "github.com/brunoborges/ghx/src/internal/context"
 	"github.com/brunoborges/ghx/src/internal/metrics"
 	"github.com/brunoborges/ghx/src/internal/protocol"
 )
@@ -57,12 +59,74 @@ func TestHandler_ForwardsRequestEnvToGH(t *testing.T) {
 	}
 }
 
+func TestHandler_DoesNotCacheFailedReads(t *testing.T) {
+	dir := t.TempDir()
+	countFile := dir + "/count"
+	fakeGH := dir + "/gh"
+	if err := os.WriteFile(fakeGH, []byte(`#!/bin/sh
+count=0
+if [ -f "`+countFile+`" ]; then
+	count=$(cat "`+countFile+`")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "`+countFile+`"
+if [ "$count" -eq 1 ]; then
+	echo 'HTTP 401: Bad credentials' >&2
+	exit 1
+fi
+echo 'ok'
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{GHPath: fakeGH, TTL: 60 * time.Second}
+	c := cache.New(100)
+	cl := allowlist.NewClassifier(nil)
+	s := metrics.New()
+	h := NewHandler(cfg, c, cl, s)
+	req := &protocol.Request{
+		Type: protocol.TypeExec,
+		Args: []string{"pr", "view", "123", "--json", "number"},
+		Context: execctx.ExecContext{
+			Host:      "github.com",
+			Repo:      "owner/repo",
+			Branch:    "main",
+			TokenHash: "token",
+		},
+	}
+
+	first := h.Handle(req)
+	if first.ExitCode == 0 {
+		t.Fatalf("expected first read to fail")
+	}
+
+	second := h.Handle(req)
+	if second.ExitCode != 0 {
+		t.Fatalf("expected second read to retry instead of returning cached failure, got %d: %s", second.ExitCode, second.Stderr)
+	}
+	if got := strings.TrimSpace(string(second.Stdout)); got != "ok" {
+		t.Fatalf("expected second read stdout ok, got %q", got)
+	}
+	if got := strings.TrimSpace(mustReadFile(t, countFile)); got != "2" {
+		t.Fatalf("expected fake gh to execute twice, got count %s", got)
+	}
+}
+
 func TestHandlerEnvHelperProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_HANDLER_ENV_HELPER") != "1" {
 		return
 	}
 	fmt.Fprint(os.Stdout, os.Getenv("GHX_HANDLER_ENV"))
 	os.Exit(0)
+}
+
+func mustReadFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }
 
 func TestHandler_GHPath_AtomicAccess(t *testing.T) {
