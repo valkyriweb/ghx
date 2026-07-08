@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -60,6 +61,9 @@ func TestHandler_ForwardsRequestEnvToGH(t *testing.T) {
 }
 
 func TestHandler_DoesNotCacheFailedReads(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake gh is a #!/bin/sh script; not executable on windows")
+	}
 	dir := t.TempDir()
 	countFile := dir + "/count"
 	fakeGH := dir + "/gh"
