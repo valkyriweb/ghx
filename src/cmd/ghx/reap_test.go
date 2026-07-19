@@ -61,7 +61,9 @@ func TestReapDaemonNothingRunning(t *testing.T) {
 	cfg := tmpCfg(t)
 	// Stale files pointing at a dead PID — reap should clear them and report
 	// nothing was running.
-	os.WriteFile(cfg.SocketPath, []byte{}, 0600)
+	if runtime.GOOS != "windows" {
+		os.WriteFile(cfg.SocketPath, []byte{}, 0600)
+	}
 	os.WriteFile(cfg.PIDFile, []byte(strconv.Itoa(0x7FFFFFF0)), 0600)
 
 	if reapDaemon(cfg) {
