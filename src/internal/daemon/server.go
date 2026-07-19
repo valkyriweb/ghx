@@ -185,6 +185,12 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 	conn.SetReadDeadline(time.Time{}) // clear — Handle() may run a long gh command
 
+	// Remove all deadlines before executing the command. Long-running gh commands
+	// (multi-minute GraphQL queries, large JSON payloads) must not be cut off by
+	// a fixed socket timeout, which would cause the client to fall back to direct
+	// execution and silently double-spend API quota.
+	conn.SetDeadline(time.Time{})
+
 	resp := s.handler.Handle(&req)
 
 	// Check for shutdown request

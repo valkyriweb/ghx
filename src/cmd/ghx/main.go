@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/brunoborges/ghx/src/internal/allowlist"
+	"github.com/brunoborges/ghx/src/internal/authenv"
 	"github.com/brunoborges/ghx/src/internal/client"
 	"github.com/brunoborges/ghx/src/internal/config"
 	execctx "github.com/brunoborges/ghx/src/internal/context"
@@ -50,10 +53,11 @@ func main() {
 	// Resolve real gh binary (lazy — only on execution path)
 	mustResolveGH(cfg)
 
-	// Bypass the daemon for interactive/auth commands. These open a browser or
-	// wait on device-flow input, run far longer than any proxy timeout, and must
-	// never be cached. Run them directly so they own the terminal.
-	if len(ghArgs) > 0 && ghArgs[0] == "auth" {
+	// Short-circuit: passthrough commands (e.g. auth login, config, codespace) are
+	// interactive or otherwise unsuitable for the daemon. Execute gh directly so the
+	// user gets a full TTY and no IPC timeout can occur.
+	classifier := allowlist.NewClassifier(cfg.AdditionalCache)
+	if classifier.Classify(ghArgs).Type == allowlist.Passthrough {
 		execDirect(cfg.GHPath, ghArgs)
 		return
 	}
@@ -82,7 +86,9 @@ func main() {
 	cl := client.New(cfg.SocketPath)
 	if ready, err := ensureDaemon(cfg, cl); !ready {
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "ghx: %v (falling back to direct gh)\n", err)
+			fmt.Fprintf(os.Stderr, "ghx: warning: %v (bypassing cache)\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "ghx: warning: daemon not running, bypassing cache (start with: ghx xdaemon start)\n")
 		}
 		execDirect(cfg.GHPath, ghArgs)
 		return
@@ -95,14 +101,24 @@ func main() {
 		Args:        ghArgs,
 		Context:     ctx,
 		WorkDir:     workDir,
-		Env:         daemonRequestEnv(os.Environ()),
+		AuthEnv:     authenv.Capture(),
 		NoCache:     noCache,
 		TTLOverride: ttlOverride,
 	}
 
 	resp, err := cl.Send(req)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ghx: daemon error: %v (falling back to direct gh)\n", err)
+		var errSent *client.ErrRequestSent
+		if errors.As(err, &errSent) {
+			// The request reached the daemon, which may have already executed the
+			// command. Falling back to direct gh would cause silent double-execution
+			// (duplicate API calls, quota double-spend, or repeated side-effects for
+			// mutating commands). Abort instead and let the user decide.
+			fmt.Fprintf(os.Stderr, "ghx: daemon error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "ghx: not falling back — command may have already been executed by the daemon\n")
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "ghx: warning: daemon error: %v (bypassing cache)\n", err)
 		execDirect(cfg.GHPath, ghArgs)
 		return
 	}
@@ -167,26 +183,6 @@ func shouldBypassDaemon(args []string) bool {
 		}
 	}
 	return false
-}
-
-func daemonRequestEnv(env []string) []string {
-	allowed := map[string]bool{
-		"GH_TOKEN":                true,
-		"GITHUB_TOKEN":            true,
-		"GH_ENTERPRISE_TOKEN":     true,
-		"GITHUB_ENTERPRISE_TOKEN": true,
-		"GH_HOST":                 true,
-		"GH_REPO":                 true,
-		"GH_CONFIG_DIR":           true,
-	}
-	filtered := make([]string, 0, len(allowed))
-	for _, entry := range env {
-		key, _, ok := strings.Cut(entry, "=")
-		if ok && allowed[key] {
-			filtered = append(filtered, entry)
-		}
-	}
-	return filtered
 }
 
 // parseGHXFlags extracts ghx-specific flags from the argument list.

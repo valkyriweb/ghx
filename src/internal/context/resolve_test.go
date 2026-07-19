@@ -3,6 +3,7 @@ package context
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -52,34 +53,35 @@ func TestResolveHostFromGHConfigPrefersGitHubDotComWhenConfigured(t *testing.T) 
 	}
 }
 
-func TestResolveTokenHashUsesEnvTokenBeforeGHConfig(t *testing.T) {
-	t.Setenv("GH_TOKEN", "token-a")
-	t.Setenv("GITHUB_TOKEN", "token-b")
+func TestCacheKeyIsolatesAuthIdentity(t *testing.T) {
+	args := []string{"api", "user"}
+	first := CacheKey(ExecContext{
+		Host:      "github.com",
+		Repo:      "owner/repo",
+		Branch:    "main",
+		TokenHash: tokenHash("account-one-token"),
+	}, args)
+	second := CacheKey(ExecContext{
+		Host:      "github.com",
+		Repo:      "owner/repo",
+		Branch:    "main",
+		TokenHash: tokenHash("account-two-token"),
+	}, args)
 
-	got := resolveTokenHash("/path/that/must/not/run", "github.com")
-	want := hashToken("token-a")
-	if got != want {
-		t.Fatalf("resolveTokenHash() = %q, want %q", got, want)
+	if first == second {
+		t.Fatal("cache keys for different auth identities must differ")
 	}
 }
 
-func TestResolveTokenHashUsesGitHubTokenFallback(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "token-b")
-
-	got := resolveTokenHash("/path/that/must/not/run", "github.com")
-	want := hashToken("token-b")
-	if got != want {
-		t.Fatalf("resolveTokenHash() = %q, want %q", got, want)
+func TestTokenHashIsFullSHA256Fingerprint(t *testing.T) {
+	got := tokenHash("secret-token")
+	if len(got) != 64 {
+		t.Fatalf("tokenHash() length = %d, want 64", len(got))
 	}
-}
-
-func TestResolveTokenHashUsesEnterpriseTokenForEnterpriseHost(t *testing.T) {
-	t.Setenv("GH_ENTERPRISE_TOKEN", "enterprise-token")
-	t.Setenv("GH_TOKEN", "dotcom-token")
-
-	got := resolveTokenHash("/path/that/must/not/run", "ghe.example.com")
-	want := hashToken("enterprise-token")
-	if got != want {
-		t.Fatalf("resolveTokenHash() = %q, want %q", got, want)
+	if strings.Contains(got, "secret-token") {
+		t.Fatal("tokenHash() exposed the raw token")
+	}
+	if got != tokenHash("secret-token") {
+		t.Fatal("tokenHash() is not deterministic")
 	}
 }
