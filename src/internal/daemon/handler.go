@@ -34,6 +34,13 @@ type Handler struct {
 	mu       sync.Mutex
 	inflight map[string]*call
 	execute  func(context.Context, string, []string, string, authenv.Environment) *executor.Result
+
+	// onTrustFailure is invoked at most once, when a child gh reports a TLS
+	// trust-evaluation failure. A daemon in that state is unrecoverable in place
+	// (see executor.IsTrustFailure), so the only useful response is to stand down
+	// and let the next gh call spawn a daemon with a fresh TLS context.
+	trustOnce      sync.Once
+	onTrustFailure func()
 }
 
 type call struct {
@@ -57,6 +64,30 @@ func NewHandler(cfg *config.Config, c *cache.Cache, cl *allowlist.Classifier, s 
 	return h
 }
 
+// SetOnTrustFailure registers the daemon's self-reap hook. Called once at wiring time.
+func (h *Handler) SetOnTrustFailure(fn func()) {
+	h.onTrustFailure = fn
+}
+
+// noteTrustFailure reaps the daemon the first time a TLS trust fault is seen.
+//
+// Deliberately fire-once: a wedged trust context fails every concurrent request, and
+// shutting down repeatedly mid-drain would be noisier than useless.
+func (h *Handler) noteTrustFailure(result *executor.Result) {
+	if !executor.IsTrustFailure(result) {
+		return
+	}
+	h.trustOnce.Do(func() {
+		log.Println("TLS trust evaluation failed in child gh -- this daemon's TLS context is " +
+			"unrecoverable (proxy/CA/GODEBUG env is frozen at daemon start); standing down so " +
+			"the next gh call starts a clean daemon. This is NOT a credential problem -- do not " +
+			"rotate tokens.")
+		if h.onTrustFailure != nil {
+			h.onTrustFailure()
+		}
+	})
+}
+
 // GHPath returns the current resolved gh binary path.
 func (h *Handler) GHPath() string {
 	return h.ghPath.Load().(string)
@@ -75,7 +106,9 @@ func (h *Handler) execGH(args []string, workDir string, env authenv.Environment)
 			ghPath = newPath
 		}
 	}
-	return h.execute(context.Background(), ghPath, args, workDir, env)
+	result := h.execute(context.Background(), ghPath, args, workDir, env)
+	h.noteTrustFailure(result)
+	return result
 }
 
 // reResolveGHPath attempts to find a new gh binary and updates the stored path.

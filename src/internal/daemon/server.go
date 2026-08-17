@@ -59,7 +59,7 @@ func NewServer(cfg *config.Config, version string, resolvedGHPath string) *Serve
 	handler := NewHandler(cfg, c, classifier, stats)
 	handler.SetGHPath(resolvedGHPath)
 
-	return &Server{
+	s := &Server{
 		cfg:     cfg,
 		cache:   c,
 		stats:   stats,
@@ -67,6 +67,15 @@ func NewServer(cfg *config.Config, version string, resolvedGHPath string) *Serve
 		done:    make(chan struct{}),
 		version: version,
 	}
+
+	// A daemon whose TLS trust context has gone bad fails every gh call on the host
+	// until something restarts it, and nothing supervises ghxd -- it is spawned lazily
+	// by the first gh call and then lives indefinitely. Self-reap instead of wedging:
+	// the next gh call starts a daemon with a fresh TLS context. Shutdown() blocks on
+	// in-flight work, so it must not run on the request goroutine.
+	handler.SetOnTrustFailure(func() { go s.Shutdown() })
+
+	return s
 }
 
 // Run starts the daemon and blocks until shutdown.

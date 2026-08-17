@@ -49,3 +49,14 @@ and the `ghx-rollout` docs under `infra/`. After a release, upgrade with
 - State lives in `~/.ghx/`: `ghxd.sock`, `ghxd.pid`, `ghxd.lock`, `ghxd.log`, `config.yaml`, `bin/gh`.
 - Recovery from a wedged daemon: `ghx xdaemon restart` (now reaps hard), or
   `pkill -9 -f ghxd && rm -f ~/.ghx/ghxd.{sock,pid,lock} && gh --version`.
+- **The daemon's non-auth environment is frozen at start.** Children run with
+  `authenv.Apply(os.Environ(), env)`, and only the auth vars in `internal/authenv`
+  are forwarded per-call. `HTTPS_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR` and
+  `GODEBUG` are inherited from whenever the daemon was born and replayed into every
+  `gh` call on the machine thereafter.
+- **`x509: OSStatus -26276` is a trust-store fault, not a bad credential.** Because
+  `gh` on PATH is the ghx client and it never falls back to direct `gh`, one daemon
+  with a bad TLS context fails *every* `gh` call on the host while plain `curl`
+  still succeeds. Do **not** rotate tokens for this. The daemon now detects it
+  (`executor.IsTrustFailure`) and stands down so the next call starts clean;
+  confirm with `GODEBUG=x509usefallbackroots=1 gh api /rate_limit`.
