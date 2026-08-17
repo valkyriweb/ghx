@@ -309,3 +309,34 @@ func newTestHandler() *Handler {
 	cfg := &config.Config{GHPath: "gh", MaxCacheEntries: 100, TTL: 30 * time.Second}
 	return NewHandler(cfg, cache.New(100), allowlist.NewClassifier(nil), metrics.New())
 }
+
+// A trust fault must reap the daemon exactly once, no matter how many calls hit it.
+func TestExecGHReapsDaemonOnTrustFailure(t *testing.T) {
+	h := newTestHandler()
+	h.execute = func(context.Context, string, []string, string, authenv.Environment) *executor.Result {
+		return &executor.Result{
+			ExitCode: 1,
+			Stderr:   []byte("tls: failed to verify certificate: x509: OSStatus -26276"),
+		}
+	}
+	reaped := 0
+	h.SetOnTrustFailure(func() { reaped++ })
+
+	h.execGH([]string{"api", "/rate_limit"}, "", nil)
+	h.execGH([]string{"api", "graphql"}, "", nil)
+
+	if reaped != 1 {
+		t.Fatalf("trust failure reaped daemon %d times, want exactly 1", reaped)
+	}
+}
+
+// An ordinary failure must never reap the daemon -- a 401 is a credential problem.
+func TestExecGHDoesNotReapOnOrdinaryFailure(t *testing.T) {
+	h := newTestHandler()
+	h.execute = func(context.Context, string, []string, string, authenv.Environment) *executor.Result {
+		return &executor.Result{ExitCode: 1, Stderr: []byte("HTTP 401: Bad credentials")}
+	}
+	h.SetOnTrustFailure(func() { t.Fatal("ordinary failure must not reap the daemon") })
+
+	h.execGH([]string{"api", "/rate_limit"}, "", nil)
+}
