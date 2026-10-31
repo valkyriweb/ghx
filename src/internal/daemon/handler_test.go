@@ -3,7 +3,9 @@ package daemon
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -310,23 +312,58 @@ func newTestHandler() *Handler {
 	return NewHandler(cfg, cache.New(100), allowlist.NewClassifier(nil), metrics.New())
 }
 
-// A trust fault must reap the daemon exactly once, no matter how many calls hit it.
-func TestExecGHReapsDaemonOnTrustFailure(t *testing.T) {
-	h := newTestHandler()
-	h.execute = func(context.Context, string, []string, string, authenv.Environment) *executor.Result {
-		return &executor.Result{
-			ExitCode: 1,
-			Stderr:   []byte("tls: failed to verify certificate: x509: OSStatus -26276"),
-		}
+func TestHandlerTrustFailurePreservesResponsesAndReapsOnce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake gh is a shell script")
 	}
-	reaped := 0
-	h.SetOnTrustFailure(func() { reaped++ })
-
-	h.execGH([]string{"api", "/rate_limit"}, "", nil)
-	h.execGH([]string{"api", "graphql"}, "", nil)
-
-	if reaped != 1 {
-		t.Fatalf("trust failure reaped daemon %d times, want exactly 1", reaped)
+	const diagnostic = "tls: failed to verify certificate: x509: OSStatus -26276\n"
+	fakeGH := filepath.Join(t.TempDir(), "gh")
+	if err := os.WriteFile(fakeGH, []byte("#!/bin/sh\nprintf '%s' fixture-output\nprintf '%s\\n' 'tls: failed to verify certificate: x509: OSStatus -26276' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []struct {
+		name    string
+		verb    string
+		noCache bool
+	}{
+		{name: "cacheable read", verb: "view"},
+		{name: "uncached read", verb: "view", noCache: true},
+		{name: "mutation", verb: "close"},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			cfg := &config.Config{GHPath: fakeGH, TTL: time.Minute}
+			h := NewHandler(cfg, cache.New(100), allowlist.NewClassifier(nil), metrics.New())
+			var reaped atomic.Int32
+			h.SetOnTrustFailure(func() { reaped.Add(1) })
+			const requests = 8
+			start := make(chan struct{})
+			responses := make(chan *protocol.Response, requests)
+			for i := range requests {
+				go func() {
+					<-start
+					responses <- h.Handle(&protocol.Request{
+						Type:    protocol.TypeExec,
+						Args:    []string{"pr", mode.verb, strconv.Itoa(i + 1)},
+						NoCache: mode.noCache,
+						Context: execctx.ExecContext{Host: "github.com", Repo: "example/project"},
+					})
+				}()
+			}
+			close(start)
+			for range requests {
+				select {
+				case response := <-responses:
+					if response.ExitCode != 1 || string(response.Stdout) != "fixture-output" || string(response.Stderr) != diagnostic || response.Cached {
+						t.Errorf("trust failure response lost child result: %+v", response)
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatal("request did not return its child result")
+				}
+			}
+			if got := reaped.Load(); got != 1 {
+				t.Fatalf("daemon reap notifications = %d, want 1", got)
+			}
+		})
 	}
 }
 
