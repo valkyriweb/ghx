@@ -5,6 +5,9 @@ Fork of `brunoborges/ghx`. See `UPSTREAM.md` for provenance.
 ## Unreleased
 
 ### Fixed
+- Update the Homebrew tap release audit snapshot alongside the GHX formula.
+- Reject a release without its version heading in this changelog before building
+  or publishing.
 - Make detached daemon start/restart wait until `ghxd` accepts control requests,
   preventing `gh xdaemon restart && gh xcache flush` from racing a freshly
   spawned daemon.
@@ -19,6 +22,14 @@ Fork of `brunoborges/ghx`. See `UPSTREAM.md` for provenance.
   long-lived daemon instead of inheriting the daemon's startup identity.
 - Apply `GHX_TTL`, `GHX_SOCKET`, and `GHX_GH_PATH` overrides even when
   `~/.ghx/config.yaml` does not exist.
+
+## v1.7.1 — 2026-08-17
+
+### Fixed
+- Stand down on TLS trust failure instead of wedging subsequent `gh` calls
+  ([#5](https://github.com/valkyriweb/ghx/pull/5)).
+
+Published release: [v1.7.1](https://github.com/valkyriweb/ghx/releases/tag/v1.7.1).
 
 ## v1.6.0 — 2026-06-05
 
