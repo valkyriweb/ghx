@@ -7,25 +7,14 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
-
-	"github.com/brunoborges/ghx/src/internal/config"
 )
 
-// startDaemon launches ghxd as a background process.
-// On Windows, CREATE_NEW_PROCESS_GROUP is used instead of Setsid.
-func startDaemon(cfg *config.Config) error {
-	ghxdPath, err := findGHXD()
-	if err != nil {
-		return err
-	}
-
-	cmd := exec.Command(ghxdPath)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+func configureDetached(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: 0x00000200} // CREATE_NEW_PROCESS_GROUP
-
-	return cmd.Start()
 }
+
+// Named pipes have no persistent instance lock; readiness is checked over IPC.
+func daemonOwnsSocket(_ string) (bool, error) { return false, nil }
 
 // execDirect runs gh directly (bypass daemon entirely).
 // Windows has no exec-replace, so we run the command and exit.
@@ -48,37 +37,6 @@ func execDirect(ghPath string, args []string) {
 		os.Exit(1)
 	}
 	os.Exit(0)
-}
-
-// processAlive reports whether a process with the given PID currently exists.
-// On Windows, os.FindProcess opens a real handle and fails for unknown PIDs.
-func processAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	_ = p
-	return true
-}
-
-// terminateProcess stops a process. Windows has no SIGTERM, so this is a hard kill.
-func terminateProcess(pid int) error {
-	if pid <= 0 {
-		return nil
-	}
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return err
-	}
-	return p.Kill()
-}
-
-// killProcess forcibly terminates a process.
-func killProcess(pid int) error {
-	return terminateProcess(pid)
 }
 
 // execReplace emulates exec-replace on Windows by running the command and exiting.

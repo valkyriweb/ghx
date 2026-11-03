@@ -8,50 +8,29 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
-
-	"github.com/brunoborges/ghx/src/internal/config"
 )
 
-// processAlive reports whether a process with the given PID currently exists.
-// EPERM means the process exists but we lack permission to signal it; treat it
-// as alive (we own ghxd, so this is unlikely in practice).
-func processAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	err := syscall.Kill(pid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
-}
-
-// terminateProcess asks a process to shut down gracefully (SIGTERM).
-func terminateProcess(pid int) error {
-	if pid <= 0 {
-		return nil
-	}
-	return syscall.Kill(pid, syscall.SIGTERM)
-}
-
-// killProcess forcibly terminates a wedged process (SIGKILL).
-func killProcess(pid int) error {
-	if pid <= 0 {
-		return nil
-	}
-	return syscall.Kill(pid, syscall.SIGKILL)
-}
-
-// startDaemon launches ghxd as a background process.
-func startDaemon(cfg *config.Config) error {
-	ghxdPath, err := findGHXD()
-	if err != nil {
-		return err
-	}
-
-	cmd := exec.Command(ghxdPath)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+func configureDetached(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+}
 
-	return cmd.Start()
+// A closed listener does not imply that in-flight requests have drained.
+func daemonOwnsSocket(path string) (bool, error) {
+	lock, err := os.OpenFile(path+".lock", os.O_RDWR, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return true, nil
+		}
+		return false, err
+	}
+	return false, nil
 }
 
 // execDirect runs gh directly, replacing the current process (bypass daemon entirely).

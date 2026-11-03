@@ -6,6 +6,12 @@ on:
   schedule:
     - cron: '0 8 * * *'
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit SHA or ref to test
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -15,6 +21,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
 
       - uses: actions/setup-go@v6
         with:
@@ -39,6 +47,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
 
       - uses: actions/setup-go@v6
         with:
@@ -61,6 +71,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
 
       - uses: actions/setup-go@v6
         with:

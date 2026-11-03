@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -11,15 +12,18 @@ import (
 type Config struct {
 	TTL             time.Duration            `yaml:"ttl"`
 	TTLOverrides    map[string]time.Duration `yaml:"ttl_overrides"`
+	ImmutableTTL    time.Duration            `yaml:"immutable_ttl"` // content addressed by commit SHA
+	SettledTTL      time.Duration            `yaml:"settled_ttl"`   // specific runs/jobs reporting status "completed"
+	MaxCacheBytes   int64                    `yaml:"max_cache_bytes"`
 	MaxCacheEntries int                      `yaml:"max_cache_entries"`
 	SocketPath      string                   `yaml:"socket_path"`
 	PIDFile         string                   `yaml:"pid_file"`
-	LockFile        string                   `yaml:"lock_file"`
 	AutoStart       bool                     `yaml:"auto_start"`
 	AdditionalCache []string                 `yaml:"additional_cacheable"`
 	DashboardPort   int                      `yaml:"dashboard_port"`
 	GHPath          string                   `yaml:"gh_path"`
 	LogFile         string                   `yaml:"log_file"`
+	LogArgs         bool                     `yaml:"log_args"` // keep redacted command arguments in the in-memory request log
 }
 
 func DefaultConfig() *Config {
@@ -27,10 +31,12 @@ func DefaultConfig() *Config {
 	return &Config{
 		TTL:             30 * time.Second,
 		TTLOverrides:    make(map[string]time.Duration),
+		ImmutableTTL:    time.Hour,
+		SettledTTL:      10 * time.Minute,
 		MaxCacheEntries: 1000,
+		MaxCacheBytes:   64 << 20,
 		SocketPath:      defaultSocketPath(ghxDir),
 		PIDFile:         filepath.Join(ghxDir, "ghxd.pid"),
-		LockFile:        filepath.Join(ghxDir, "ghxd.lock"),
 		AutoStart:       true,
 		DashboardPort:   9847,
 		GHPath:          "gh",
@@ -44,16 +50,13 @@ func Load() (*Config, error) {
 	ghxDir := defaultGHXDir()
 	configPath := filepath.Join(ghxDir, "config.yaml")
 	data, err := os.ReadFile(configPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			applyEnvOverrides(cfg)
-			return cfg, nil
-		}
+	if err != nil && !os.IsNotExist(err) {
 		return cfg, err
 	}
-
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return cfg, err
+	if err == nil {
+		if err := yaml.Unmarshal(data, cfg); err != nil {
+			return cfg, err
+		}
 	}
 
 	applyEnvOverrides(cfg)
@@ -73,6 +76,9 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("GHX_GH_PATH"); v != "" {
 		cfg.GHPath = v
+	}
+	if v := os.Getenv("GHX_LOG_ARGS"); v != "" {
+		cfg.LogArgs = v == "1" || strings.EqualFold(v, "true")
 	}
 }
 
