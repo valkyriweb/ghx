@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -66,6 +67,31 @@ func TestDaemonLifecycleProcess(t *testing.T) {
 			}
 			io.Copy(io.Discard, conn)
 			conn.Close()
+		}
+	case "wedged":
+		// Ignores SIGTERM, owns the instance lock and never answers requests.
+		signal.Ignore(syscall.SIGTERM)
+		lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+			t.Fatal(err)
+		}
+		ln, err := ipc.Listen(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pidFile := filepath.Join(filepath.Dir(path), "pid")
+		if err := os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
+			t.Fatal(err)
+		}
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close() // hold open, never reply
 		}
 	case "delayed ready":
 		time.Sleep(200 * time.Millisecond)
@@ -328,5 +354,62 @@ func TestRestartDaemonWaitsForCommandDrain(t *testing.T) {
 	}
 	if string(pid) == strconv.Itoa(os.Getpid()) {
 		t.Fatal("restart did not replace the original daemon")
+	}
+}
+
+// Fork behaviour: a daemon that ignores shutdown and SIGTERM is force-killed.
+func TestStopDaemonForceKillsWedgedDaemon(t *testing.T) {
+	cfg := daemonFixture(t)
+	installDaemonFixture(t, cfg, "wedged")
+	cmd := exec.Command(filepath.Join(filepath.Dir(cfg.SocketPath), "ghxd"))
+	configureDetached(cmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan struct{})
+	go func() { cmd.Wait(); close(exited) }()
+	t.Cleanup(func() {
+		cmd.Process.Kill()
+		<-exited
+	})
+	waitForFixture(t, func() bool {
+		return readPIDFile(cfg.PIDFile) == cmd.Process.Pid && client.New(cfg.SocketPath).IsRunning()
+	})
+
+	oldShutdown, oldSignal := daemonShutdownTimeout, daemonSignalTimeout
+	daemonShutdownTimeout, daemonSignalTimeout = 200*time.Millisecond, time.Second
+	t.Cleanup(func() { daemonShutdownTimeout, daemonSignalTimeout = oldShutdown, oldSignal })
+
+	start := time.Now()
+	res, err := stopDaemon(cfg, 300*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.found || !res.forced {
+		t.Fatalf("expected forced stop, got %+v", res)
+	}
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("wedged daemon still running after stopDaemon")
+	}
+	if elapsed := time.Since(start); elapsed < daemonSignalTimeout {
+		t.Fatalf("SIGTERM should have been ignored before SIGKILL; stopped after %s", elapsed)
+	}
+	for _, f := range []string{cfg.SocketPath, cfg.PIDFile} {
+		if _, err := os.Stat(f); !os.IsNotExist(err) {
+			t.Fatalf("%s not removed: %v", f, err)
+		}
+	}
+}
+
+func TestStopDaemonNothingRunning(t *testing.T) {
+	cfg := daemonFixture(t)
+	if err := os.WriteFile(cfg.PIDFile, []byte(strconv.Itoa(0x7FFFFFF0)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	res, err := stopDaemon(cfg, 100*time.Millisecond)
+	if err != nil || res.found || res.forced {
+		t.Fatalf("got %+v, %v", res, err)
 	}
 }

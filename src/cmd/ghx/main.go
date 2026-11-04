@@ -247,17 +247,16 @@ func handleDaemon(cfg *config.Config, args []string) {
 		handleDaemonStart(cfg, args[1:])
 
 	case "stop":
-		cl := client.New(cfg.SocketPath)
-		if !cl.IsRunning() {
-			fmt.Println("ghx: daemon is not running")
-			return
-		}
-		resp, err := cl.Send(&protocol.Request{Type: protocol.TypeShutdown})
-		if err != nil {
+		res, err := stopDaemon(cfg, daemonStopTimeout)
+		switch {
+		case err != nil:
 			fmt.Fprintf(os.Stderr, "ghx: stop failed: %v\n", err)
 			os.Exit(1)
+		case !res.found:
+			fmt.Println("ghx: daemon is not running")
+		case res.forced:
+			fmt.Println("ghx: daemon force-stopped (did not drain in time)")
 		}
-		os.Stdout.Write(resp.Stdout)
 
 	case "status":
 		cl := client.New(cfg.SocketPath)

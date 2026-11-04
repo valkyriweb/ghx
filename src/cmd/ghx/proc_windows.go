@@ -16,6 +16,31 @@ func configureDetached(cmd *exec.Cmd) {
 // Named pipes have no persistent instance lock; readiness is checked over IPC.
 func daemonOwnsSocket(_ string) (bool, error) { return false, nil }
 
+// processAlive reports whether pid exists; FindProcess opens a real handle on
+// Windows and fails for unknown PIDs.
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	p.Release()
+	return true
+}
+
+// terminateProcess hard-kills: Windows has no SIGTERM.
+func terminateProcess(pid int) error {
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return p.Kill()
+}
+
+func killProcess(pid int) error { return terminateProcess(pid) }
+
 // execDirect runs gh directly (bypass daemon entirely).
 // Windows has no exec-replace, so we run the command and exit.
 func execDirect(ghPath string, args []string) {

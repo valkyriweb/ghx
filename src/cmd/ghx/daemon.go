@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/brunoborges/ghx/src/internal/client"
@@ -19,22 +21,105 @@ const (
 	daemonPollInterval = 50 * time.Millisecond
 )
 
+// Fork behaviour (valkyriweb): a daemon that does not drain within the stop
+// timeout is force-killed via its recorded PID (SIGTERM, then SIGKILL), so a
+// wedged daemon can never block stop/restart or leave two daemons running.
+var (
+	daemonShutdownTimeout = 2 * time.Second
+	daemonSignalTimeout   = 2 * time.Second
+)
+
+type stopResult struct {
+	found  bool // a daemon (listener, lock owner or live PID) existed
+	forced bool // graceful drain timed out and the PID was signalled
+}
+
 func restartDaemon(cfg *config.Config) error {
-	cl := client.New(cfg.SocketPath)
-	if cl.IsRunning() {
-		resp, err := cl.Send(&protocol.Request{Type: protocol.TypeShutdown})
-		if err != nil {
-			return fmt.Errorf("stop daemon: %w", err)
-		}
-		if resp.Error != "" || resp.ExitCode != 0 {
-			return fmt.Errorf("stop daemon: exit code %d: %s", resp.ExitCode, resp.Error)
-		}
-		os.Stdout.Write(resp.Stdout)
-	}
-	if err := waitForDaemonStop(cfg.SocketPath, daemonStopTimeout); err != nil {
+	if _, err := stopDaemon(cfg, daemonStopTimeout); err != nil {
 		return err
 	}
 	return startDaemon(cfg)
+}
+
+// stopDaemon asks the daemon to shut down and waits for in-flight requests to
+// drain. If it is still alive after drainTimeout, it escalates SIGTERM ->
+// SIGKILL against the PID file and then clears the socket and PID files.
+func stopDaemon(cfg *config.Config, drainTimeout time.Duration) (stopResult, error) {
+	cl := client.New(cfg.SocketPath)
+	pid := readPIDFile(cfg.PIDFile)
+	owned, err := daemonOwnsSocket(cfg.SocketPath)
+	if err != nil {
+		return stopResult{}, fmt.Errorf("check daemon ownership: %w", err)
+	}
+	running := cl.IsRunning()
+	res := stopResult{found: running || owned || processAlive(pid)}
+	if !res.found {
+		return res, nil
+	}
+	if running {
+		// Bounded: a wedged daemon may accept the connection but never reply.
+		type sent struct {
+			resp *protocol.Response
+			err  error
+		}
+		done := make(chan sent, 1)
+		go func() {
+			resp, err := cl.Send(&protocol.Request{Type: protocol.TypeShutdown})
+			done <- sent{resp, err}
+		}()
+		select {
+		case r := <-done:
+			if r.err == nil && r.resp != nil {
+				os.Stdout.Write(r.resp.Stdout)
+			}
+		case <-time.After(daemonShutdownTimeout):
+		}
+	}
+	drainErr := waitForDaemonStop(cfg.SocketPath, drainTimeout)
+	if drainErr == nil && !processAlive(pid) {
+		return res, nil
+	}
+	if !processAlive(pid) {
+		if drainErr != nil {
+			return res, fmt.Errorf("%w; no live daemon PID to force-kill", drainErr)
+		}
+		return res, nil
+	}
+	res.forced = true
+	_ = terminateProcess(pid)
+	if !waitProcessGone(pid, daemonSignalTimeout) {
+		_ = killProcess(pid)
+		if !waitProcessGone(pid, daemonSignalTimeout) {
+			return res, fmt.Errorf("daemon (pid %d) survived SIGKILL", pid)
+		}
+	}
+	os.Remove(cfg.SocketPath)
+	os.Remove(cfg.PIDFile)
+	return res, nil
+}
+
+// readPIDFile returns the daemon PID recorded on disk, or 0 if unavailable.
+func readPIDFile(path string) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid == os.Getpid() {
+		return 0
+	}
+	return pid
+}
+
+func waitProcessGone(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for processAlive(pid) {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(daemonPollInterval)
+	}
+	return true
 }
 
 func waitForDaemonStop(path string, timeout time.Duration) error {
