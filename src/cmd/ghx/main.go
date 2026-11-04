@@ -57,17 +57,8 @@ func main() {
 	// interactive or otherwise unsuitable for the daemon. Execute gh directly so the
 	// user gets a full TTY and no IPC timeout can occur.
 	classifier := allowlist.NewClassifier(cfg.AdditionalCache)
-	if classifier.Classify(ghArgs).Type == allowlist.Passthrough {
-		execDirect(cfg.GHPath, ghArgs)
-		return
-	}
-
-	// Bypass the daemon when stdin is piped. The daemon protocol does not
-	// forward stdin, so commands that read it (gh secret set, gh api --input -,
-	// gh issue create --body-file -, etc.) would silently receive an empty
-	// stream. Caching stdin-driven calls is also low value — they're writes,
-	// not reads. execDirect replaces the current process so stdin is preserved.
-	if stat, err := os.Stdin.Stat(); err == nil && (stat.Mode()&os.ModeCharDevice) == 0 {
+	classification := classifier.Classify(ghArgs)
+	if classification.Type == allowlist.Passthrough {
 		execDirect(cfg.GHPath, ghArgs)
 		return
 	}
@@ -81,6 +72,13 @@ func main() {
 
 	// Resolve execution context
 	ctx := execctx.Resolve(cfg.GHPath)
+	if classification.Type == allowlist.Mutation {
+		cmd := exec.Command(cfg.GHPath, ghArgs...)
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+		ctx.Host, ctx.Repo = classification.Target(ctx.Host, ctx.Repo)
+		req := &protocol.Request{Type: protocol.TypeFlush, Context: ctx, Resource: classification.Resource}
+		os.Exit(runMutation(cmd, req, client.New(cfg.SocketPath).Send))
+	}
 
 	// Connect to daemon, auto-starting if needed
 	cl := client.New(cfg.SocketPath)
@@ -151,6 +149,18 @@ func handleSubcommand(cfg *config.Config, args []string) bool {
 	return true
 }
 
+func shouldBypassDaemon(args []string) bool {
+	if len(args) >= 2 && args[0] == "run" && args[1] == "watch" {
+		return true
+	}
+	for _, arg := range args {
+		if arg == "--watch" || strings.HasPrefix(arg, "--watch=") {
+			return true
+		}
+	}
+	return false
+}
+
 func printHelp(cfg *config.Config) {
 	fmt.Println("ghx — GitHub CLI Cache Proxy")
 	fmt.Printf("Version: %s\n", version)
@@ -171,18 +181,6 @@ func printHelp(cfg *config.Config) {
 	fmt.Println("All other arguments are forwarded to gh via the caching daemon.")
 	fmt.Printf("Config: ~/.ghx/\n")
 	fmt.Printf("Dashboard: http://127.0.0.1:%d/\n", cfg.DashboardPort)
-}
-
-func shouldBypassDaemon(args []string) bool {
-	if len(args) >= 2 && args[0] == "run" && args[1] == "watch" {
-		return true
-	}
-	for _, arg := range args {
-		if arg == "--watch" || strings.HasPrefix(arg, "--watch=") {
-			return true
-		}
-	}
-	return false
 }
 
 // parseGHXFlags extracts ghx-specific flags from the argument list.
@@ -209,34 +207,11 @@ func parseGHXFlags(args []string) (ghArgs []string, noCache bool, ttlOverride in
 	return
 }
 
-type daemonClient interface {
-	IsRunning() bool
-	Send(*protocol.Request) (*protocol.Response, error)
-}
-
-// waitDaemonReady waits until the daemon accepts control requests, not merely
-// until the socket exists. This prevents `gh xdaemon restart && gh xcache flush`
-// from racing the freshly spawned daemon.
-func waitDaemonReady(cl daemonClient, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for {
-		if cl.IsRunning() {
-			if _, err := cl.Send(&protocol.Request{Type: protocol.TypeStats}); err == nil {
-				return true
-			}
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
 // ensureDaemon makes sure the daemon is running, auto-starting it if configured.
 // Returns (true, nil) if daemon is ready, (false, nil) if auto-start is disabled,
 // or (false, err) if auto-start failed.
 func ensureDaemon(cfg *config.Config, cl *client.Client) (bool, error) {
-	if waitDaemonReady(cl, 500*time.Millisecond) {
+	if cl.IsRunning() {
 		return true, nil
 	}
 	if !cfg.AutoStart {
@@ -244,13 +219,21 @@ func ensureDaemon(cfg *config.Config, cl *client.Client) (bool, error) {
 	}
 
 	if err := startDaemon(cfg); err != nil {
+		// A concurrent client may have won the instance lock while our child
+		// exited. Give that daemon the same readiness window as before.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				if daemonReady(cfg.SocketPath, min(100*time.Millisecond, time.Until(deadline))) == nil {
+					return true, nil
+				}
+				time.Sleep(daemonPollInterval)
+			}
+		}
 		return false, fmt.Errorf("daemon auto-start failed: %v", err)
 	}
-
-	if waitDaemonReady(cl, 2*time.Second) {
-		return true, nil
-	}
-	return false, fmt.Errorf("daemon failed to start in time")
+	return true, nil
 }
 
 func handleDaemon(cfg *config.Config, args []string) {
@@ -264,10 +247,15 @@ func handleDaemon(cfg *config.Config, args []string) {
 		handleDaemonStart(cfg, args[1:])
 
 	case "stop":
-		if reapDaemon(cfg) {
-			fmt.Println("ghx: daemon stopped")
-		} else {
+		res, err := stopDaemon(cfg, daemonStopTimeout)
+		switch {
+		case err != nil:
+			fmt.Fprintf(os.Stderr, "ghx: stop failed: %v\n", err)
+			os.Exit(1)
+		case !res.found:
 			fmt.Println("ghx: daemon is not running")
+		case res.forced:
+			fmt.Println("ghx: daemon force-stopped (did not drain in time)")
 		}
 
 	case "status":
@@ -284,8 +272,11 @@ func handleDaemon(cfg *config.Config, args []string) {
 		printFormattedStats(resp.Stdout)
 
 	case "restart":
-		reapDaemon(cfg) // blocks until the old daemon is gone and files are cleared
-		handleDaemon(cfg, []string{"start", "-d"})
+		if err := restartDaemon(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "ghx: restart failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("ghx: daemon started (socket: %s, dashboard: http://127.0.0.1:%d/)\n", cfg.SocketPath, cfg.DashboardPort)
 
 	default:
 		fmt.Fprintf(os.Stderr, "ghx: unknown daemon command: %s\n", args[0])
@@ -293,115 +284,10 @@ func handleDaemon(cfg *config.Config, args []string) {
 	}
 }
 
-// readPIDFile returns the daemon PID recorded on disk, or 0 if unavailable.
-func readPIDFile(cfg *config.Config) int {
-	data, err := os.ReadFile(cfg.PIDFile)
-	if err != nil {
-		return 0
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		return 0
-	}
-	return pid
-}
-
-// cleanupDaemonFiles removes the socket and PID files left behind by a daemon.
-func cleanupDaemonFiles(cfg *config.Config) {
-	os.Remove(cfg.SocketPath)
-	os.Remove(cfg.PIDFile)
-}
-
-// daemonGone reports whether the daemon has fully stopped: not listening on its
-// socket and the recorded PID no longer exists.
-func daemonGone(cl *client.Client, pid int) bool {
-	return !cl.IsRunning() && (pid <= 0 || !processAlive(pid))
-}
-
-// waitGone polls until the daemon is fully gone or the timeout elapses.
-func waitGone(cl *client.Client, pid int, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for {
-		if daemonGone(cl, pid) {
-			return true
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
-// reapDaemon stops a running daemon robustly and clears stale state. It escalates
-// graceful shutdown -> SIGTERM -> SIGKILL so a wedged daemon can't survive, then
-// removes the socket and PID files so a fresh start can bind. Returns true if a
-// daemon was found running (or its PID was alive), false if nothing was running.
-func reapDaemon(cfg *config.Config) bool {
-	cl := client.New(cfg.SocketPath)
-	pid := readPIDFile(cfg)
-	found := cl.IsRunning() || processAlive(pid)
-
-	if !found {
-		cleanupDaemonFiles(cfg) // clear any stale socket/PID left by a crash
-		return false
-	}
-
-	// 1. Graceful shutdown via the socket, bounded so a wedged daemon (accepts
-	//    connections but never replies) can't block us for the client's full
-	//    60s read deadline.
-	if cl.IsRunning() {
-		done := make(chan struct{})
-		go func() {
-			_, _ = cl.Send(&protocol.Request{Type: protocol.TypeShutdown})
-			close(done)
-		}()
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-		}
-		if waitGone(cl, pid, 3*time.Second) {
-			cleanupDaemonFiles(cfg)
-			return true
-		}
-	}
-
-	// 2. SIGTERM the recorded PID.
-	if processAlive(pid) {
-		_ = terminateProcess(pid)
-		if waitGone(cl, pid, 2*time.Second) {
-			cleanupDaemonFiles(cfg)
-			return true
-		}
-	}
-
-	// 3. SIGKILL — last resort for a wedged daemon that ignores SIGTERM.
-	if processAlive(pid) {
-		_ = killProcess(pid)
-		waitGone(cl, pid, 2*time.Second)
-	}
-
-	cleanupDaemonFiles(cfg)
-	return true
-}
-
 func handleDaemonStart(cfg *config.Config, args []string) {
 	if isDetachMode(args) {
-		// Refuse to spawn a second daemon, and clear stale socket/PID files left
-		// by a crashed daemon so the new one can bind.
-		cl := client.New(cfg.SocketPath)
-		if cl.IsRunning() {
-			fmt.Println("ghx: daemon already running")
-			return
-		}
-		if pid := readPIDFile(cfg); !processAlive(pid) {
-			cleanupDaemonFiles(cfg)
-		}
 		if err := startDaemon(cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "ghx: failed to start daemon: %v\n", err)
-			os.Exit(1)
-		}
-		if !waitDaemonReady(cl, 2*time.Second) {
-			fmt.Fprintln(os.Stderr, "ghx: daemon started but did not become ready")
 			os.Exit(1)
 		}
 		fmt.Printf("ghx: daemon started (socket: %s, dashboard: http://127.0.0.1:%d/)\n", cfg.SocketPath, cfg.DashboardPort)
@@ -475,16 +361,19 @@ func handleCache(cfg *config.Config, args []string) {
 
 func printFormattedStats(data []byte) {
 	var stats struct {
-		Uptime       string                     `json:"uptime"`
-		Total        int64                      `json:"total"`
-		Hits         int64                      `json:"hits"`
-		Misses       int64                      `json:"misses"`
-		Passthrough  int64                      `json:"passthrough"`
-		Coalesced    int64                      `json:"coalesced"`
-		HitRate      float64                    `json:"hit_rate"`
-		CacheSize    int                        `json:"cache_size"`
-		MaxCacheSize int                        `json:"max_cache_size"`
-		Commands     map[string]json.RawMessage `json:"commands"`
+		Uptime        string                     `json:"uptime"`
+		Total         int64                      `json:"total"`
+		Hits          int64                      `json:"hits"`
+		Misses        int64                      `json:"misses"`
+		Passthrough   int64                      `json:"passthrough"`
+		Coalesced     int64                      `json:"coalesced"`
+		HitRate       float64                    `json:"hit_rate"`
+		CacheSize     int                        `json:"cache_size"`
+		CacheBytes    int64                      `json:"cache_bytes"`
+		MaxCacheBytes int64                      `json:"max_cache_bytes"`
+		CacheRejected int64                      `json:"cache_rejected"`
+		MaxCacheSize  int                        `json:"max_cache_size"`
+		Commands      map[string]json.RawMessage `json:"commands"`
 	}
 	if err := json.Unmarshal(data, &stats); err != nil {
 		os.Stdout.Write(data)
@@ -498,6 +387,8 @@ func printFormattedStats(data []byte) {
 	fmt.Printf("Passthrough:     %d\n", stats.Passthrough)
 	fmt.Printf("Coalesced:       %d\n", stats.Coalesced)
 	fmt.Printf("Cache Size:      %d / %d entries\n", stats.CacheSize, stats.MaxCacheSize)
+	fmt.Printf("Cache Bytes:     %d / %d bytes\n", stats.CacheBytes, stats.MaxCacheBytes)
+	fmt.Printf("Cache Rejected:  %d\n", stats.CacheRejected)
 
 	if len(stats.Commands) > 0 {
 		fmt.Println("\nTop Commands:")
@@ -585,10 +476,13 @@ func handleGHStatus(cfg *config.Config) {
 
 	managed := ghcli.IsManagedGH(resolved)
 	source := "PATH"
-	if cfg.GHPath != "" && cfg.GHPath != "gh" {
-		source = "config (gh_path)"
-	} else if managed {
+	switch {
+	case managed:
 		source = "managed (~/.ghx/bin/gh)"
+	case cfg.GHPath != "" && cfg.GHPath != "gh" && resolved == cfg.GHPath:
+		source = "config (gh_path)"
+	case ghcli.IsPackageManagerGH(resolved):
+		source = "package manager (shadowed by the ghx shim)"
 	}
 
 	fmt.Printf("gh binary:  %s\n", resolved)
@@ -608,6 +502,19 @@ func handleGHStatus(cfg *config.Config) {
 			days := int(age.Hours() / 24)
 			fmt.Printf("installed:  %d days ago\n", days)
 		}
+	}
+
+	// Show other gh binaries that the shim would otherwise hide, so a newer
+	// package-manager install is visible at a glance.
+	for _, candidate := range ghcli.FindPackageManagerGHs() {
+		if candidate.Path == resolved {
+			continue
+		}
+		note := ""
+		if ver != "" && ghcli.CompareVersions(candidate.Version, ver) > 0 {
+			note = "  <- newer"
+		}
+		fmt.Printf("also found: %s (version %s)%s\n", candidate.Path, candidate.Version, note)
 	}
 }
 

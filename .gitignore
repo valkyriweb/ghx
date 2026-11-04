@@ -13,5 +13,5 @@ bin/
 .vscode/
 *.swp
 
-# release build artifacts
+# Release archives
 dist/

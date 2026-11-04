@@ -8,13 +8,14 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
-
-	"github.com/brunoborges/ghx/src/internal/config"
 )
 
-// processAlive reports whether a process with the given PID currently exists.
-// EPERM means the process exists but we lack permission to signal it; treat it
-// as alive (we own ghxd, so this is unlikely in practice).
+func configureDetached(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+}
+
+// processAlive reports whether pid exists. EPERM means it exists but cannot be
+// signalled. Zombies are reaped by init (the daemon is setsid-detached).
 func processAlive(pid int) bool {
 	if pid <= 0 {
 		return false
@@ -23,35 +24,27 @@ func processAlive(pid int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
-// terminateProcess asks a process to shut down gracefully (SIGTERM).
-func terminateProcess(pid int) error {
-	if pid <= 0 {
-		return nil
-	}
-	return syscall.Kill(pid, syscall.SIGTERM)
-}
+func terminateProcess(pid int) error { return syscall.Kill(pid, syscall.SIGTERM) }
 
-// killProcess forcibly terminates a wedged process (SIGKILL).
-func killProcess(pid int) error {
-	if pid <= 0 {
-		return nil
-	}
-	return syscall.Kill(pid, syscall.SIGKILL)
-}
+func killProcess(pid int) error { return syscall.Kill(pid, syscall.SIGKILL) }
 
-// startDaemon launches ghxd as a background process.
-func startDaemon(cfg *config.Config) error {
-	ghxdPath, err := findGHXD()
+// A closed listener does not imply that in-flight requests have drained.
+func daemonOwnsSocket(path string) (bool, error) {
+	lock, err := os.OpenFile(path+".lock", os.O_RDWR, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
 	if err != nil {
-		return err
+		return false, err
 	}
-
-	cmd := exec.Command(ghxdPath)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-
-	return cmd.Start()
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return true, nil
+		}
+		return false, err
+	}
+	return false, nil
 }
 
 // execDirect runs gh directly, replacing the current process (bypass daemon entirely).
