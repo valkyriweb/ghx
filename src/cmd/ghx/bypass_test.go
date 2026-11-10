@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/brunoborges/ghx/src/internal/allowlist"
+	execctx "github.com/brunoborges/ghx/src/internal/context"
 	"github.com/brunoborges/ghx/src/internal/protocol"
 )
 
@@ -45,7 +46,42 @@ func TestCacheableReadsDoNotReadStdin(t *testing.T) {
 		t.Fatalf("type=%d, want cacheable", class.Type)
 	}
 	if commandReadsStdin(args) {
-		t.Fatal("a pipe on a cacheable read must not bypass the daemon")
+		t.Fatal("a cacheable read with no input flag must not be treated as a stdin reader")
+	}
+	stdin, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	if stdinNeedsDirectExecution(args, stdin) {
+		t.Fatal("a cacheable read with terminal-like stdin should use the daemon")
+	}
+}
+
+func TestPipedStdinAlwaysUsesDirectPath(t *testing.T) {
+	stdin, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = writer.Close()
+	defer stdin.Close()
+
+	tests := []struct {
+		args []string
+		want allowlist.CommandType
+	}{
+		{args: []string{"gist", "create"}, want: allowlist.Mutation},
+		{args: []string{"unrecognized", "command"}, want: allowlist.Passthrough},
+		{args: []string{"pr", "view", "8", "--json", "number"}, want: allowlist.Cacheable},
+	}
+	classifier := allowlist.NewClassifier(nil)
+	for _, tt := range tests {
+		if got := classifier.Classify(tt.args).Type; got != tt.want {
+			t.Fatalf("Classify(%v) = %d, want %d", tt.args, got, tt.want)
+		}
+		if !stdinNeedsDirectExecution(tt.args, stdin) {
+			t.Errorf("piped stdin for %v must use direct execution", tt.args)
+		}
 	}
 }
 
@@ -77,7 +113,12 @@ func TestStdinReadersBypassDaemon(t *testing.T) {
 	}
 }
 
-func TestPipedMutationsWithoutStdinUseDaemon(t *testing.T) {
+func TestMutationsWithoutPipedInputUseDaemon(t *testing.T) {
+	stdin, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
 	for _, args := range [][]string{
 		{"pr", "edit", "8", "--title", "updated"},
 		{"pr", "comment", "8", "--body", "note"},
@@ -86,20 +127,9 @@ func TestPipedMutationsWithoutStdinUseDaemon(t *testing.T) {
 		if class.Type != allowlist.Mutation {
 			t.Fatalf("type=%d for %v, want mutation", class.Type, args)
 		}
-		if commandReadsStdin(args) {
-			t.Fatalf("piped mutation %v does not read stdin and must use the daemon for invalidation", args)
+		if stdinNeedsDirectExecution(args, stdin) {
+			t.Fatalf("mutation %v with terminal-like stdin should use daemon invalidation", args)
 		}
-	}
-}
-
-func TestDirectStdinMutationsFlushCache(t *testing.T) {
-	args := []string{"api", "-X", "POST", "--input", "-", "/repos/o/r/issues"}
-	class := allowlist.NewClassifier(nil).Classify(args)
-	if class.Type != allowlist.Mutation {
-		t.Fatalf("type=%d, want mutation", class.Type)
-	}
-	if !shouldFlushAfterDirectMutation(class, commandReadsStdin(args)) {
-		t.Fatal("a direct stdin mutation must flush cached results after it exits")
 	}
 }
 
@@ -136,17 +166,18 @@ func (c *recordingDaemonClient) Send(req *protocol.Request) (*protocol.Response,
 	return &protocol.Response{}, nil
 }
 
-func TestFlushCacheAfterDirectMutation(t *testing.T) {
+func TestInvalidateRepoCacheAfterDirectCommand(t *testing.T) {
+	ctx := execctx.ExecContext{Host: "github.com", Repo: "owner/repo"}
 	cl := &recordingDaemonClient{running: true}
-	if err := flushCacheAfterDirectMutation(cl); err != nil {
+	if err := invalidateRepoCacheAfterDirectCommand(cl, ctx); err != nil {
 		t.Fatal(err)
 	}
-	if cl.request == nil || cl.request.Type != protocol.TypeFlush {
-		t.Fatalf("request=%+v, want cache flush", cl.request)
+	if cl.request == nil || cl.request.Type != protocol.TypeFlush || cl.request.Context != ctx {
+		t.Fatalf("request=%+v, want repo-scoped cache flush for %+v", cl.request, ctx)
 	}
 
 	stopped := &recordingDaemonClient{}
-	if err := flushCacheAfterDirectMutation(stopped); err != nil {
+	if err := invalidateRepoCacheAfterDirectCommand(stopped, ctx); err != nil {
 		t.Fatal(err)
 	}
 	if stopped.request != nil {

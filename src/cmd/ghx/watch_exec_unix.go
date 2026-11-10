@@ -14,9 +14,16 @@ import (
 // does not end the watch. The child stays in this process group so an external
 // timeout that signals the group stops both. A signal delivered only to ghx
 // is forwarded to the child, then ghx exits — the child must not keep polling.
-func execWatchWithRetry(ghPath string, args []string) {
+// after runs once when a piped-input watch exits or is interrupted.
+func execWatchWithRetry(ghPath string, args []string, after func()) {
 	var mu sync.Mutex
 	var child *exec.Cmd
+	var afterOnce sync.Once
+	runAfter := func() {
+		if after != nil {
+			afterOnce.Do(after)
+		}
+	}
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
@@ -29,6 +36,7 @@ func execWatchWithRetry(ghPath string, args []string) {
 		if cmd != nil && cmd.Process != nil {
 			_ = cmd.Process.Signal(sig)
 		}
+		runAfter()
 		if s, ok := sig.(syscall.Signal); ok {
 			os.Exit(128 + int(s))
 		}
@@ -59,5 +67,6 @@ func execWatchWithRetry(ghPath string, args []string) {
 		}
 		return 1, append(stderr(), []byte(err.Error())...)
 	}, timeSleep, watchRetryNotice)
+	runAfter()
 	os.Exit(code)
 }

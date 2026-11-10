@@ -53,28 +53,26 @@ func main() {
 	// Resolve real gh binary (lazy — only on execution path)
 	mustResolveGH(cfg)
 
+	// A piped stdin may be consumed by any command, including one the classifier
+	// does not know. Run it directly and invalidate this repository's cache.
+	if stdinNeedsDirectExecution(ghArgs, os.Stdin) {
+		ctx := execctx.Resolve(cfg.GHPath)
+		if shouldBypassDaemon(ghArgs) {
+			execWatchWithRetry(cfg.GHPath, ghArgs, func() { invalidateRepoCache(cfg, ctx) })
+			return
+		}
+		execDirectAndInvalidateRepo(cfg, ghArgs, ctx)
+		return
+	}
+
 	// Short-circuit: passthrough commands (e.g. auth login, config, codespace) are
-	// interactive or otherwise unsuitable for the daemon. Execute gh directly so the
-	// user gets a full TTY and no IPC timeout can occur. Watch-style passthrough
+	// interactive or otherwise unsuitable for the daemon. Watch-style passthrough
 	// (gh run watch) still gets the transient-timeout retry.
 	classifier := allowlist.NewClassifier(cfg.AdditionalCache)
 	classification := classifier.Classify(ghArgs)
 	if classification.Type == allowlist.Passthrough {
 		if shouldBypassDaemon(ghArgs) {
-			execWatchWithRetry(cfg.GHPath, ghArgs)
-			return
-		}
-		execDirect(cfg.GHPath, ghArgs)
-		return
-	}
-
-	// The daemon does not forward stdin, so commands that read it must exec gh
-	// directly. Invalidate cached data after direct mutations, even when the
-	// child exits with an error because the mutation may have partially completed.
-	readsStdin := commandReadsStdin(ghArgs)
-	if readsStdin {
-		if shouldFlushAfterDirectMutation(classification, readsStdin) {
-			execDirectWithCacheFlush(cfg, ghArgs)
+			execWatchWithRetry(cfg.GHPath, ghArgs, nil)
 			return
 		}
 		execDirect(cfg.GHPath, ghArgs)
@@ -84,7 +82,7 @@ func main() {
 	// Watch commands stay out of the request/response daemon: they run for as
 	// long as CI does. A transient TCP timeout used to exit the watch; retry it.
 	if shouldBypassDaemon(ghArgs) {
-		execWatchWithRetry(cfg.GHPath, ghArgs)
+		execWatchWithRetry(cfg.GHPath, ghArgs, nil)
 		return
 	}
 
@@ -204,11 +202,17 @@ var stdinFileFlags = map[string]bool{
 	"--recover-file": true,
 }
 
-// shouldFlushAfterDirectMutation identifies direct mutations that read stdin.
-// The daemon cannot forward stdin, so gh runs directly and the cache is flushed
-// after it exits to prevent stale reads.
-func shouldFlushAfterDirectMutation(class allowlist.Classification, readsStdin bool) bool {
-	return class.Type == allowlist.Mutation && readsStdin
+// stdinNeedsDirectExecution avoids the daemon whenever input may be piped.
+// Explicit stdin flags also bypass it when stdin is a terminal.
+func stdinNeedsDirectExecution(args []string, stdin *os.File) bool {
+	if stdin == nil {
+		return true
+	}
+	info, err := stdin.Stat()
+	if err != nil || info.Mode()&os.ModeCharDevice == 0 {
+		return true
+	}
+	return commandReadsStdin(args)
 }
 
 func commandReadsStdin(args []string) bool {
@@ -287,21 +291,23 @@ type daemonClient interface {
 	Send(*protocol.Request) (*protocol.Response, error)
 }
 
-func flushCacheAfterDirectMutation(cl daemonClient) error {
+func invalidateRepoCacheAfterDirectCommand(cl daemonClient, ctx execctx.ExecContext) error {
 	if !cl.IsRunning() {
 		return nil
 	}
-	_, err := cl.Send(&protocol.Request{Type: protocol.TypeFlush})
+	_, err := cl.Send(&protocol.Request{Type: protocol.TypeFlush, Context: ctx})
 	return err
 }
 
-func execDirectWithCacheFlush(cfg *config.Config, args []string) {
+func invalidateRepoCache(cfg *config.Config, ctx execctx.ExecContext) {
 	cl := client.New(cfg.SocketPath)
-	code := runDirectAndAfter(cfg.GHPath, args, func() {
-		if err := flushCacheAfterDirectMutation(cl); err != nil {
-			fmt.Fprintf(os.Stderr, "ghx: warning: cache flush after direct mutation failed: %v\n", err)
-		}
-	})
+	if err := invalidateRepoCacheAfterDirectCommand(cl, ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "ghx: warning: cache invalidation after direct command failed: %v\n", err)
+	}
+}
+
+func execDirectAndInvalidateRepo(cfg *config.Config, args []string, ctx execctx.ExecContext) {
+	code := runDirectAndAfter(cfg.GHPath, args, func() { invalidateRepoCache(cfg, ctx) })
 	os.Exit(code)
 }
 

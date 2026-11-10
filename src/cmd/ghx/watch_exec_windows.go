@@ -7,7 +7,7 @@ import (
 	"os/exec"
 )
 
-func execWatchWithRetry(ghPath string, args []string) {
+func execWatchWithRetry(ghPath string, args []string, after func()) {
 	code := runWithTransientRetry(func() (int, []byte) {
 		path, err := exec.LookPath(ghPath)
 		if err != nil {
@@ -23,5 +23,8 @@ func execWatchWithRetry(ghPath string, args []string) {
 		}
 		return 1, append(stderr(), []byte(err.Error())...)
 	}, timeSleep, watchRetryNotice)
+	if after != nil {
+		after()
+	}
 	os.Exit(code)
 }

@@ -106,6 +106,28 @@ func TestInvalidateNamespace(t *testing.T) {
 	}
 }
 
+func TestInvalidateRepo(t *testing.T) {
+	c := New(100)
+	for _, entry := range []*Entry{
+		{Key: "pr", Host: "github.com", Repo: "o/r", Resource: allowlist.ResourcePR, CachedAt: time.Now(), TTL: time.Minute},
+		{Key: "issue", Host: "github.com", Repo: "o/r", Resource: allowlist.ResourceIssue, CachedAt: time.Now(), TTL: time.Minute},
+		{Key: "other-repo", Host: "github.com", Repo: "o/other", Resource: allowlist.ResourcePR, CachedAt: time.Now(), TTL: time.Minute},
+		{Key: "other-host", Host: "ghe.example", Repo: "o/r", Resource: allowlist.ResourcePR, CachedAt: time.Now(), TTL: time.Minute},
+	} {
+		c.Set(entry)
+	}
+
+	if n := c.InvalidateRepo("github.com", "o/r"); n != 2 {
+		t.Fatalf("invalidated %d entries, want 2", n)
+	}
+	if c.Get("pr") != nil || c.Get("issue") != nil {
+		t.Fatal("all entries for the target repo should be removed")
+	}
+	if c.Get("other-repo") == nil || c.Get("other-host") == nil {
+		t.Fatal("entries for other repositories and hosts should remain")
+	}
+}
+
 func TestFlushAll(t *testing.T) {
 	c := New(100)
 	c.Set(&Entry{Key: "a", CachedAt: time.Now(), TTL: time.Minute})

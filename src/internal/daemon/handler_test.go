@@ -387,6 +387,28 @@ func TestHandler_ServesReadWithinGraceAfterTTL(t *testing.T) {
 	}
 }
 
+func TestHandlerFlushScopedToRepository(t *testing.T) {
+	h := newTestHandler()
+	for _, entry := range []*cache.Entry{
+		{Key: "pr", Host: "github.com", Repo: "o/r", Resource: allowlist.ResourcePR, CachedAt: time.Now(), TTL: time.Minute},
+		{Key: "issue", Host: "github.com", Repo: "o/r", Resource: allowlist.ResourceIssue, CachedAt: time.Now(), TTL: time.Minute},
+		{Key: "other", Host: "github.com", Repo: "o/other", Resource: allowlist.ResourcePR, CachedAt: time.Now(), TTL: time.Minute},
+	} {
+		h.cache.Set(entry)
+	}
+
+	resp := h.Handle(&protocol.Request{
+		Type:    protocol.TypeFlush,
+		Context: execctx.ExecContext{Host: "github.com", Repo: "o/r"},
+	})
+	if got := string(resp.Stdout); got != "flushed 2 entries\n" {
+		t.Fatalf("flush response = %q, want 2 entries", got)
+	}
+	if h.cache.Size() != 1 {
+		t.Fatalf("cache size = %d, want 1 remaining entry", h.cache.Size())
+	}
+}
+
 func newTestHandler() *Handler {
 	cfg := &config.Config{GHPath: "gh", MaxCacheEntries: 100, TTL: 30 * time.Second}
 	return NewHandler(cfg, cache.New(100), allowlist.NewClassifier(nil), metrics.New())

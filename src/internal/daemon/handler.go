@@ -294,7 +294,12 @@ func (h *Handler) handleStats() *protocol.Response {
 }
 
 func (h *Handler) handleFlush(req *protocol.Request) *protocol.Response {
-	count := h.cache.Flush()
+	count := 0
+	if req.Context.Host != "" && req.Context.Repo != "" {
+		count = h.cache.InvalidateRepo(req.Context.Host, req.Context.Repo)
+	} else {
+		count = h.cache.Flush()
+	}
 	msg := []byte(fmt.Sprintf("flushed %d entries\n", count))
 	return &protocol.Response{Stdout: msg}
 }
