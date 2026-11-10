@@ -138,6 +138,22 @@ func TestAPIClassification(t *testing.T) {
 	if cl.Type != Mutation {
 		t.Errorf("GET --input: type=%d, want Mutation", cl.Type)
 	}
+
+	// The last --method wins, matching gh's flag parser.
+	cl = c.Classify([]string{"api", "/repos/o/r/issues", "-X", "GET", "-X", "POST", "-f", "title=x"})
+	if cl.Type != Mutation {
+		t.Errorf("last -X POST: type=%d, want Mutation", cl.Type)
+	}
+	cl = c.Classify([]string{"api", "/user", "-X", "POST", "--method=GET"})
+	if cl.Type != Cacheable {
+		t.Errorf("last --method=GET: type=%d, want Cacheable", cl.Type)
+	}
+
+	// @path is file contents. The filename is in the key; the bytes are not.
+	cl = c.Classify([]string{"api", "-X", "GET", "search/issues", "-F", "q=@query.txt"})
+	if cl.Type != Mutation {
+		t.Errorf("file-backed GET: type=%d, want Mutation", cl.Type)
+	}
 }
 
 func TestAdditionalCacheable(t *testing.T) {

@@ -120,7 +120,7 @@ The allowlist is configurable — users can add custom commands via `additional_
 
 These commands are **passed through directly** to `gh` with no daemon involvement, preserving TTY, stdin, and interactive behavior.
 
-A non-terminal stdin is not itself a bypass. Agent shells invoke `gh` with a pipe; cacheable reads (`pr view`, `pr checks`, `api` GET, `run view`) still go through the daemon. Commands that read stdin (`--input -`, `--body-file -`, a bare `-`, `gh api -F key=@-`) skip the daemon, because the protocol does not forward stdin.
+A non-terminal stdin is not itself a bypass. Agent shells invoke `gh` with a pipe; cacheable reads (`pr view`, `pr checks`, `api` GET, `run view`) still go through the daemon. Commands that read stdin (`--input -`, `--body-file -`, `gh api -F key=@-`) skip the daemon, because the protocol does not forward stdin. A literal `--body -` does not.
 
 `gh api` without `--method` is a POST when `-f`, `-F`, or `--input` is set, and `graphql` is a POST. Those calls are not cached. An explicit `--method GET` with field values in the arguments stays a cacheable query.
 

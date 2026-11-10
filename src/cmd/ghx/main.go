@@ -192,10 +192,11 @@ func shouldBypassDaemon(args []string) bool {
 }
 
 // stdinFileFlags are flags whose value "-" means "read this from stdin".
+// `--body -` is the literal text "-"; only `--body-file -` reads stdin.
 var stdinFileFlags = map[string]bool{
 	"--input":        true,
 	"--body-file":    true,
-	"--body":         true,
+	"-F":             true,
 	"--notes-file":   true,
 	"--recover-file": true,
 }
@@ -225,29 +226,30 @@ func shouldBypassPipedStdin(class allowlist.Classification, args []string, stdin
 
 func commandReadsStdin(args []string) bool {
 	for i, arg := range args {
-		if arg == "-" || fieldReadsStdin(arg) {
-			return true
-		}
 		if eq := strings.IndexByte(arg, '='); eq > 0 && arg[eq+1:] == "-" && stdinFileFlags[arg[:eq]] {
 			return true
 		}
 		if stdinFileFlags[arg] && i+1 < len(args) && args[i+1] == "-" {
 			return true
 		}
-		if isAPIFieldFlag(arg) && i+1 < len(args) && fieldReadsStdin(args[i+1]) {
+		// -F/--field reads a file when the value is @path. -f is a literal.
+		if (arg == "-F" || arg == "--field") && i+1 < len(args) && magicFieldReadsStdin(args[i+1]) {
+			return true
+		}
+		if strings.HasPrefix(arg, "--field=") && magicFieldReadsStdin(arg) {
 			return true
 		}
 	}
 	return false
 }
 
-// fieldReadsStdin reports a gh api -f/-F value that reads stdin (`@-`).
-func fieldReadsStdin(value string) bool {
-	return value == "@-" || strings.HasSuffix(value, "=@-")
-}
-
-func isAPIFieldFlag(arg string) bool {
-	return arg == "-f" || arg == "-F" || arg == "--field" || arg == "--raw-field"
+func magicFieldReadsStdin(spec string) bool {
+	spec = strings.TrimPrefix(spec, "--field=")
+	eq := strings.IndexByte(spec, '=')
+	if eq < 0 {
+		return false
+	}
+	return spec[eq+1:] == "@-"
 }
 
 // parseGHXFlags extracts ghx-specific flags from the argument list.

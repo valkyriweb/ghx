@@ -226,7 +226,9 @@ func (c *Classifier) classifyAPI(args []string) Classification {
 			method = "GET"
 		}
 	}
-	if strings.ToUpper(method) != "GET" || apiHasInput(args) {
+	// A magic -F value that starts with @ is file contents, not part of the
+	// cache key. -f is a literal string and does not read a file.
+	if strings.ToUpper(method) != "GET" || apiHasInput(args) || apiHasFileField(args) {
 		return Classification{Type: Mutation, Resource: ResourceAPI, CmdKey: "api_mutation"}
 	}
 
@@ -252,6 +254,9 @@ var apiValueFlags = map[string]bool{
 }
 
 func apiMethod(args []string) (string, bool) {
+	// pflag keeps the last string value. The first -X must not win.
+	method := ""
+	explicit := false
 	for i := 1; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
@@ -259,19 +264,55 @@ func apiMethod(args []string) (string, bool) {
 		}
 		switch {
 		case arg == "-X" || arg == "--method":
+			explicit = true
 			if i+1 < len(args) {
-				return args[i+1], true
+				i++
+				method = args[i]
+			} else {
+				method = ""
 			}
-			return "", true
 		case strings.HasPrefix(arg, "--method="):
-			return strings.TrimPrefix(arg, "--method="), true
+			explicit = true
+			method = strings.TrimPrefix(arg, "--method=")
 		case strings.HasPrefix(arg, "-X") && len(arg) > 2:
-			return arg[2:], true
+			explicit = true
+			method = arg[2:]
 		case apiValueFlags[arg] && !strings.Contains(arg, "="):
 			i++
 		}
 	}
-	return "", false
+	return method, explicit
+}
+
+// apiHasFileField reports a magic -F/--field value read from a file (`@path`).
+// The filename is in the cache key; the contents are not.
+func apiHasFileField(args []string) bool {
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		switch {
+		case arg == "-F" || arg == "--field":
+			if i+1 < len(args) && magicFieldIsFile(args[i+1]) {
+				return true
+			}
+		case strings.HasPrefix(arg, "--field=") && magicFieldIsFile(arg):
+			return true
+		case strings.HasPrefix(arg, "-F") && len(arg) > 2 && magicFieldIsFile(arg[2:]):
+			return true
+		}
+	}
+	return false
+}
+
+func magicFieldIsFile(spec string) bool {
+	spec = strings.TrimPrefix(spec, "--field=")
+	eq := strings.IndexByte(spec, '=')
+	if eq < 0 {
+		return false
+	}
+	return strings.HasPrefix(spec[eq+1:], "@")
 }
 
 func apiHasParameters(args []string) bool {

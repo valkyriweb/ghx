@@ -77,6 +77,22 @@ func TestPipedStdinStillBypassesStdinReadersAndMutations(t *testing.T) {
 	}
 }
 
+func TestLiteralDashDoesNotSkipInvalidation(t *testing.T) {
+	args := []string{"pr", "edit", "8", "--body", "-"}
+	class := allowlist.NewClassifier(nil).Classify(args)
+	if class.Type != allowlist.Mutation {
+		t.Fatalf("type=%d, want mutation", class.Type)
+	}
+	if shouldBypassPipedStdin(class, args, true) {
+		t.Fatal("literal --body - must reach the daemon so the cached view is invalidated")
+	}
+	raw := []string{"api", "-X", "GET", "/user", "-f", "title=@-"}
+	rawClass := allowlist.NewClassifier(nil).Classify(raw)
+	if shouldBypassPipedStdin(rawClass, raw, false) {
+		t.Fatal("-f title=@- is a literal, not stdin")
+	}
+}
+
 func TestExplicitGETWithQueryFieldsUsesDaemon(t *testing.T) {
 	args := []string{"api", "--method=GET", "search/issues", "-F", "q=is:open"}
 	class := allowlist.NewClassifier(nil).Classify(args)

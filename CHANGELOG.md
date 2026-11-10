@@ -17,7 +17,8 @@ Fork of `brunoborges/ghx`. See `UPSTREAM.md` for provenance.
   timeout on stderr instead of exiting. The watch listing stays on the
   terminal and is not scanned. Semantic failures are not retried.
 - Do not cache `gh api` calls that are POSTs by default (`-f`, `-F`, `--input`,
-  `graphql`) when `--method` is omitted. An explicit GET is still cached.
+  `graphql`) when `--method` is omitted. The last `--method` wins. An explicit
+  GET is still cached, except when a magic `-F` value is read from a file.
 
 - Make detached daemon start/restart wait until `ghxd` accepts control requests,
   preventing `gh xdaemon restart && gh xcache flush` from racing a freshly
