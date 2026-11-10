@@ -51,6 +51,17 @@ func (c *Cache) OnEvict(fn func(key string)) {
 
 // Get retrieves an entry by key. Returns nil if not found or expired.
 func (c *Cache) Get(key string) *Entry {
+	return c.GetUsable(key, 0)
+}
+
+// GetUsable returns the entry when it is younger than TTL+grace.
+// grace covers a poll that sleeps for the configured TTL: the next identical
+// call arrives a few seconds after expiry and would otherwise miss every time.
+// An entry older than TTL+grace is removed.
+func (c *Cache) GetUsable(key string, grace time.Duration) *Entry {
+	if grace < 0 {
+		grace = 0
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -60,7 +71,11 @@ func (c *Cache) Get(key string) *Entry {
 	}
 
 	entry := elem.Value.(*Entry)
-	if entry.IsExpired() {
+	limit := entry.TTL
+	if entry.TTL > 0 {
+		limit += grace
+	}
+	if time.Since(entry.CachedAt) > limit {
 		c.removeElement(elem)
 		return nil
 	}
@@ -91,17 +106,27 @@ func (c *Cache) Set(entry *Entry) {
 	c.items[entry.Key] = elem
 }
 
-// InvalidateNamespace removes all entries matching the given host, repo, and resource type.
+// InvalidateRepo removes all entries for a repository, regardless of resource type.
+func (c *Cache) InvalidateRepo(host, repo string) int {
+	return c.invalidate(host, repo, allowlist.ResourceUnknown)
+}
+
+// InvalidateNamespace removes entries matching the host, repo, and resource type.
 func (c *Cache) InvalidateNamespace(host, repo string, resource allowlist.ResourceType) int {
+	return c.invalidate(host, repo, resource)
+}
+
+func (c *Cache) invalidate(host, repo string, resource allowlist.ResourceType) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	var toRemove []*list.Element
 	for elem := c.order.Front(); elem != nil; elem = elem.Next() {
 		entry := elem.Value.(*Entry)
-		if entry.Host == host && entry.Repo == repo && entry.Resource == resource {
-			toRemove = append(toRemove, elem)
+		if entry.Host != host || entry.Repo != repo || (resource != allowlist.ResourceUnknown && entry.Resource != resource) {
+			continue
 		}
+		toRemove = append(toRemove, elem)
 	}
 
 	for _, elem := range toRemove {

@@ -53,29 +53,36 @@ func main() {
 	// Resolve real gh binary (lazy — only on execution path)
 	mustResolveGH(cfg)
 
+	// A piped stdin may be consumed by any command, including one the classifier
+	// does not know. Run it directly and invalidate this repository's cache.
+	if stdinNeedsDirectExecution(ghArgs, os.Stdin) {
+		ctx := execctx.Resolve(cfg.GHPath)
+		if shouldBypassDaemon(ghArgs) {
+			execWatchWithRetry(cfg.GHPath, ghArgs, func() { invalidateRepoCache(cfg, ctx) })
+			return
+		}
+		execDirectAndInvalidateRepo(cfg, ghArgs, ctx)
+		return
+	}
+
 	// Short-circuit: passthrough commands (e.g. auth login, config, codespace) are
-	// interactive or otherwise unsuitable for the daemon. Execute gh directly so the
-	// user gets a full TTY and no IPC timeout can occur.
+	// interactive or otherwise unsuitable for the daemon. Watch-style passthrough
+	// (gh run watch) still gets the transient-timeout retry.
 	classifier := allowlist.NewClassifier(cfg.AdditionalCache)
-	if classifier.Classify(ghArgs).Type == allowlist.Passthrough {
+	classification := classifier.Classify(ghArgs)
+	if classification.Type == allowlist.Passthrough {
+		if shouldBypassDaemon(ghArgs) {
+			execWatchWithRetry(cfg.GHPath, ghArgs, nil)
+			return
+		}
 		execDirect(cfg.GHPath, ghArgs)
 		return
 	}
 
-	// Bypass the daemon when stdin is piped. The daemon protocol does not
-	// forward stdin, so commands that read it (gh secret set, gh api --input -,
-	// gh issue create --body-file -, etc.) would silently receive an empty
-	// stream. Caching stdin-driven calls is also low value — they're writes,
-	// not reads. execDirect replaces the current process so stdin is preserved.
-	if stat, err := os.Stdin.Stat(); err == nil && (stat.Mode()&os.ModeCharDevice) == 0 {
-		execDirect(cfg.GHPath, ghArgs)
-		return
-	}
-
-	// Bypass long-running watch commands. They are inherently live, not cacheable,
-	// and can legitimately exceed the client/daemon response deadline.
+	// Watch commands stay out of the request/response daemon: they run for as
+	// long as CI does. A transient TCP timeout used to exit the watch; retry it.
 	if shouldBypassDaemon(ghArgs) {
-		execDirect(cfg.GHPath, ghArgs)
+		execWatchWithRetry(cfg.GHPath, ghArgs, nil)
 		return
 	}
 
@@ -185,6 +192,76 @@ func shouldBypassDaemon(args []string) bool {
 	return false
 }
 
+// stdinFileFlags are flags whose value "-" means "read this from stdin".
+// `--body -` is the literal text "-"; only `--body-file -` reads stdin.
+var stdinFileFlags = map[string]bool{
+	"--input":        true,
+	"--body-file":    true,
+	"-F":             true,
+	"--notes-file":   true,
+	"--recover-file": true,
+}
+
+// stdinNeedsDirectExecution avoids the daemon whenever input may be piped.
+// Explicit stdin flags also bypass it when stdin is a terminal.
+func stdinNeedsDirectExecution(args []string, stdin *os.File) bool {
+	if stdin == nil {
+		return true
+	}
+	info, err := stdin.Stat()
+	if err != nil || info.Mode()&os.ModeCharDevice == 0 {
+		return true
+	}
+	return commandReadsStdin(args)
+}
+
+func commandReadsStdin(args []string) bool {
+	if commandReadsStdinByDefault(args) {
+		return true
+	}
+	for i, arg := range args {
+		if eq := strings.IndexByte(arg, '='); eq > 0 && arg[eq+1:] == "-" && stdinFileFlags[arg[:eq]] {
+			return true
+		}
+		if stdinFileFlags[arg] && i+1 < len(args) && args[i+1] == "-" {
+			return true
+		}
+		// -F/--field reads a file when the value is @path. -f is a literal.
+		if (arg == "-F" || arg == "--field") && i+1 < len(args) && magicFieldReadsStdin(args[i+1]) {
+			return true
+		}
+		if strings.HasPrefix(arg, "--field=") && magicFieldReadsStdin(arg) {
+			return true
+		}
+	}
+	return false
+}
+
+// Secret and variable set read their value from stdin when --body is omitted.
+func commandReadsStdinByDefault(args []string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if (args[i] != "secret" && args[i] != "variable") || args[i+1] != "set" {
+			continue
+		}
+		for _, arg := range args[i+2:] {
+			if arg == "--body" || arg == "-b" || strings.HasPrefix(arg, "--body=") || strings.HasPrefix(arg, "-b=") {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func magicFieldReadsStdin(spec string) bool {
+	spec = strings.TrimPrefix(spec, "--field=")
+	eq := strings.IndexByte(spec, '=')
+	if eq < 0 {
+		return false
+	}
+	return spec[eq+1:] == "@-"
+}
+
 // parseGHXFlags extracts ghx-specific flags from the argument list.
 // It stops at the first unrecognized argument, treating the rest as gh args.
 func parseGHXFlags(args []string) (ghArgs []string, noCache bool, ttlOverride int) {
@@ -212,6 +289,26 @@ func parseGHXFlags(args []string) (ghArgs []string, noCache bool, ttlOverride in
 type daemonClient interface {
 	IsRunning() bool
 	Send(*protocol.Request) (*protocol.Response, error)
+}
+
+func invalidateRepoCacheAfterDirectCommand(cl daemonClient, ctx execctx.ExecContext) error {
+	if !cl.IsRunning() {
+		return nil
+	}
+	_, err := cl.Send(&protocol.Request{Type: protocol.TypeFlush, Context: ctx})
+	return err
+}
+
+func invalidateRepoCache(cfg *config.Config, ctx execctx.ExecContext) {
+	cl := client.New(cfg.SocketPath)
+	if err := invalidateRepoCacheAfterDirectCommand(cl, ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "ghx: warning: cache invalidation after direct command failed: %v\n", err)
+	}
+}
+
+func execDirectAndInvalidateRepo(cfg *config.Config, args []string, ctx execctx.ExecContext) {
+	code := runDirectAndAfter(cfg.GHPath, args, func() { invalidateRepoCache(cfg, ctx) })
+	os.Exit(code)
 }
 
 // waitDaemonReady waits until the daemon accepts control requests, not merely

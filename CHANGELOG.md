@@ -5,6 +5,20 @@ Fork of `brunoborges/ghx`. See `UPSTREAM.md` for provenance.
 ## Unreleased
 
 ### Fixed
+- Run commands directly when stdin is not a character device, or when an explicit
+  stdin flag indicates an input read. This preserves input for `gh gist create`
+  and unknown commands, then clears that repository's cached results. Cacheable
+  reads with character-device stdin and no stdin flags still use the daemon.
+- Cache completed `gh pr checks` reads, including exit 8 (pending) and exit 1
+  (a check failed). Transport and auth failures are still not cached.
+- Keep a cached read usable for 45s past its TTL so a poll that sleeps for the
+  TTL does not miss on every iteration.
+- Retry `gh pr checks --watch` and `gh run watch` after a transient network
+  timeout on stderr instead of exiting. The watch listing stays on the
+  terminal and is not scanned. Semantic failures are not retried.
+- Do not cache `gh api` calls that are POSTs by default (`-f`, `-F`, `--input`,
+  `graphql`) when `--method` is omitted. The last `--method` wins. An explicit
+  GET is still cached, except when a magic `-F` value is read from a file.
 - Update the Homebrew tap release audit snapshot alongside the GHX formula.
 - Reject a release without its version heading in this changelog before building
   or publishing.

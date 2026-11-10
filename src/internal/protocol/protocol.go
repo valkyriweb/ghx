@@ -39,7 +39,7 @@ type RequestType string
 
 const (
 	TypeExec     RequestType = "exec"     // Execute a gh command
-	TypeFlush    RequestType = "flush"    // Flush cache
+	TypeFlush    RequestType = "flush"    // Flush cache globally or for Context's repository
 	TypeStats    RequestType = "stats"    // Get stats
 	TypeKeys     RequestType = "keys"     // List cache keys
 	TypeShutdown RequestType = "shutdown" // Graceful shutdown

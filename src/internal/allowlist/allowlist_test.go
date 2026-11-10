@@ -115,6 +115,45 @@ func TestAPIClassification(t *testing.T) {
 	if cl.Type != Mutation {
 		t.Errorf("DELETE api: type=%d, want Mutation", cl.Type)
 	}
+
+	// -f without -X is a POST. Caching it would replay a write.
+	cl = c.Classify([]string{"api", "/repos/cli/cli/issues", "-f", "title=x"})
+	if cl.Type != Mutation {
+		t.Errorf("implicit POST via -f: type=%d, want Mutation", cl.Type)
+	}
+
+	cl = c.Classify([]string{"api", "--hostname", "example.com", "graphql", "-f", "query=q"})
+	if cl.Type != Mutation {
+		t.Errorf("graphql: type=%d, want Mutation", cl.Type)
+	}
+
+	// Explicit GET keeps field values as a query string. Those values are in the key.
+	cl = c.Classify([]string{"api", "--method=GET", "search/issues", "-F", "q=is:open"})
+	if cl.Type != Cacheable || cl.CmdKey != "api_get" {
+		t.Errorf("explicit GET with fields: type=%d key=%s, want Cacheable api_get", cl.Type, cl.CmdKey)
+	}
+
+	// --input body is not part of the cache key.
+	cl = c.Classify([]string{"api", "-X", "GET", "--input", "body.json", "/user"})
+	if cl.Type != Mutation {
+		t.Errorf("GET --input: type=%d, want Mutation", cl.Type)
+	}
+
+	// The last --method wins, matching gh's flag parser.
+	cl = c.Classify([]string{"api", "/repos/o/r/issues", "-X", "GET", "-X", "POST", "-f", "title=x"})
+	if cl.Type != Mutation {
+		t.Errorf("last -X POST: type=%d, want Mutation", cl.Type)
+	}
+	cl = c.Classify([]string{"api", "/user", "-X", "POST", "--method=GET"})
+	if cl.Type != Cacheable {
+		t.Errorf("last --method=GET: type=%d, want Cacheable", cl.Type)
+	}
+
+	// @path is file contents. The filename is in the key; the bytes are not.
+	cl = c.Classify([]string{"api", "-X", "GET", "search/issues", "-F", "q=@query.txt"})
+	if cl.Type != Mutation {
+		t.Errorf("file-backed GET: type=%d, want Mutation", cl.Type)
+	}
 }
 
 func TestAdditionalCacheable(t *testing.T) {

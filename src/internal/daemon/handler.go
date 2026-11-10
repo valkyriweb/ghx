@@ -20,6 +20,13 @@ import (
 	"github.com/brunoborges/ghx/src/internal/protocol"
 )
 
+// cacheGrace keeps a read usable past its configured TTL. Fleet poll loops
+// sleep for that TTL, and the gh call itself takes a second or two, so the
+// next identical call arrives just after expiry. Without this slack every
+// poll misses. 45s covers a 120s TTL polled at 120s and a 30s API TTL polled
+// at 60s, without holding CI status for a full extra interval.
+const cacheGrace = 45 * time.Second
+
 // Handler processes incoming requests from clients.
 type Handler struct {
 	cfg        *config.Config
@@ -186,8 +193,8 @@ func (h *Handler) handleExec(req *protocol.Request) *protocol.Response {
 	// Cacheable: check cache → singleflight → execute → store
 	cacheKey := execctx.CacheKey(req.Context, req.Args)
 
-	// Check cache
-	if entry := h.cache.Get(cacheKey); entry != nil {
+	// Check cache. Grace covers a poll that arrives just after TTL.
+	if entry := h.cache.GetUsable(cacheKey, cacheGrace); entry != nil {
 		latency := time.Since(start).Seconds() * 1000
 		h.stats.Record(cmdKey, cacheKey, metrics.ResultHit, latency)
 		return &protocol.Response{
@@ -208,10 +215,11 @@ func (h *Handler) handleExec(req *protocol.Request) *protocol.Response {
 		h.stats.Record(cmdKey, cacheKey, metrics.ResultMiss, latency)
 	}
 
-	// Store only successful reads. Transient GitHub/API failures such as 401s,
-	// 5xxs, and network errors must be retried by the next caller, not replayed
-	// from cache.
-	if result.ExitCode == 0 {
+	// Store completed reads. Transport, auth, and HTTP failures must be
+	// retried by the next caller, not replayed. gh pr checks exits 8 while
+	// checks are pending and 1 when a check failed; both are completed reads
+	// when stdout holds the listing.
+	if shouldCacheRead(cmdKey, result) {
 		ttl := h.cfg.CommandTTL(cmdKey)
 		if req.TTLOverride > 0 {
 			ttl = time.Duration(req.TTLOverride) * time.Second
@@ -235,6 +243,25 @@ func (h *Handler) handleExec(req *protocol.Request) *protocol.Response {
 		Stderr:   result.Stderr,
 		ExitCode: result.ExitCode,
 	}
+}
+
+// shouldCacheRead reports whether a completed gh read is safe to replay.
+// Exit 0 is always stored unless the output itself describes a fault.
+// pr checks additionally stores pending (exit 8) and failed-check (exit 1)
+// listings so a poll of in-progress CI does not miss on every iteration.
+func shouldCacheRead(cmdKey string, result *executor.Result) bool {
+	if result == nil || executor.IsUncacheableFailure(result.Stderr) {
+		return false
+	}
+	if result.ExitCode == 0 {
+		return true
+	}
+	// Stdout is the check listing, not an error channel. Do not scan it for
+	// HTTP markers: a check name or PR body can contain those strings.
+	if cmdKey == "pr_checks" && (result.ExitCode == 8 || result.ExitCode == 1) && len(result.Stdout) > 0 {
+		return true
+	}
+	return false
 }
 
 func (h *Handler) doSingleflight(key string, req *protocol.Request) (*executor.Result, bool) {
@@ -267,7 +294,12 @@ func (h *Handler) handleStats() *protocol.Response {
 }
 
 func (h *Handler) handleFlush(req *protocol.Request) *protocol.Response {
-	count := h.cache.Flush()
+	count := 0
+	if req.Context.Host != "" && req.Context.Repo != "" {
+		count = h.cache.InvalidateRepo(req.Context.Host, req.Context.Repo)
+	} else {
+		count = h.cache.Flush()
+	}
 	msg := []byte(fmt.Sprintf("flushed %d entries\n", count))
 	return &protocol.Response{Stdout: msg}
 }

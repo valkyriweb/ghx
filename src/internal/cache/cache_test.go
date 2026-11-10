@@ -40,6 +40,36 @@ func TestTTLExpiry(t *testing.T) {
 	}
 }
 
+func TestGetUsableHonorsGraceThenDrops(t *testing.T) {
+	c := New(10)
+	c.Set(&Entry{
+		Key:      "k1",
+		Stdout:   []byte("old"),
+		CachedAt: time.Now().Add(-50 * time.Second),
+		TTL:      30 * time.Second,
+	})
+	if c.Get("k1") != nil {
+		t.Fatal("strict get should drop an expired entry")
+	}
+	c.Set(&Entry{
+		Key:      "k1",
+		Stdout:   []byte("old"),
+		CachedAt: time.Now().Add(-50 * time.Second),
+		TTL:      30 * time.Second,
+	})
+	if c.GetUsable("k1", 45*time.Second) == nil {
+		t.Fatal("expected entry inside grace")
+	}
+	c.Set(&Entry{
+		Key:      "k2",
+		CachedAt: time.Now().Add(-90 * time.Second),
+		TTL:      30 * time.Second,
+	})
+	if c.GetUsable("k2", 45*time.Second) != nil {
+		t.Fatal("expected entry past grace to be dropped")
+	}
+}
+
 func TestLRUEviction(t *testing.T) {
 	c := New(2)
 	c.Set(&Entry{Key: "a", CachedAt: time.Now(), TTL: time.Minute})
@@ -73,6 +103,28 @@ func TestInvalidateNamespace(t *testing.T) {
 	}
 	if c.Get("issue1") == nil {
 		t.Fatal("issue entry should still exist")
+	}
+}
+
+func TestInvalidateRepo(t *testing.T) {
+	c := New(100)
+	for _, entry := range []*Entry{
+		{Key: "pr", Host: "github.com", Repo: "o/r", Resource: allowlist.ResourcePR, CachedAt: time.Now(), TTL: time.Minute},
+		{Key: "issue", Host: "github.com", Repo: "o/r", Resource: allowlist.ResourceIssue, CachedAt: time.Now(), TTL: time.Minute},
+		{Key: "other-repo", Host: "github.com", Repo: "o/other", Resource: allowlist.ResourcePR, CachedAt: time.Now(), TTL: time.Minute},
+		{Key: "other-host", Host: "ghe.example", Repo: "o/r", Resource: allowlist.ResourcePR, CachedAt: time.Now(), TTL: time.Minute},
+	} {
+		c.Set(entry)
+	}
+
+	if n := c.InvalidateRepo("github.com", "o/r"); n != 2 {
+		t.Fatalf("invalidated %d entries, want 2", n)
+	}
+	if c.Get("pr") != nil || c.Get("issue") != nil {
+		t.Fatal("all entries for the target repo should be removed")
+	}
+	if c.Get("other-repo") == nil || c.Get("other-host") == nil {
+		t.Fatal("entries for other repositories and hosts should remain")
 	}
 }
 

@@ -307,6 +307,108 @@ func TestHandler_SingleflightIsolatesAuthIdentity(t *testing.T) {
 	}
 }
 
+func TestHandler_CachesPendingChecks(t *testing.T) {
+	h := newTestHandler()
+	var calls atomic.Int32
+	h.execute = func(context.Context, string, []string, string, authenv.Environment) *executor.Result {
+		calls.Add(1)
+		return &executor.Result{ExitCode: 8, Stdout: []byte("gate\tpending\n")}
+	}
+	req := &protocol.Request{
+		Type:    protocol.TypeExec,
+		Args:    []string{"pr", "checks", "261", "--repo", "o/r"},
+		Context: execctx.ExecContext{Host: "github.com", Repo: "o/r", TokenHash: "token"},
+	}
+
+	first := h.Handle(req)
+	second := h.Handle(req)
+	if first.ExitCode != 8 || second.ExitCode != 8 {
+		t.Fatalf("exit codes = %d, %d, want 8, 8", first.ExitCode, second.ExitCode)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("executions = %d, want 1 (pending checks are a completed read)", calls.Load())
+	}
+	if !second.Cached {
+		t.Fatal("expected second pending-checks read to be served from cache")
+	}
+}
+
+func TestHandler_DoesNotCacheChecksTimeout(t *testing.T) {
+	h := newTestHandler()
+	var calls atomic.Int32
+	h.execute = func(context.Context, string, []string, string, authenv.Environment) *executor.Result {
+		n := calls.Add(1)
+		if n == 1 {
+			return &executor.Result{
+				ExitCode: 1,
+				Stderr:   []byte(`Post "https://api.github.com/graphql": read tcp 192.168.3.52:58972->20.87.245.6:443: read: operation timed out`),
+			}
+		}
+		return &executor.Result{ExitCode: 8, Stdout: []byte("gate\tpending\n")}
+	}
+	req := &protocol.Request{
+		Type:    protocol.TypeExec,
+		Args:    []string{"pr", "checks", "261"},
+		Context: execctx.ExecContext{Host: "github.com", Repo: "o/r", TokenHash: "token"},
+	}
+
+	first := h.Handle(req)
+	second := h.Handle(req)
+	if first.ExitCode != 1 || second.ExitCode != 8 {
+		t.Fatalf("exit codes = %d, %d, want 1 then 8", first.ExitCode, second.ExitCode)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("executions = %d, want 2 (timeout must not be replayed)", calls.Load())
+	}
+}
+
+func TestHandler_ServesReadWithinGraceAfterTTL(t *testing.T) {
+	h := newTestHandler()
+	req := &protocol.Request{
+		Type:    protocol.TypeExec,
+		Args:    []string{"pr", "view", "8", "--json", "number"},
+		Context: execctx.ExecContext{Host: "github.com", Repo: "o/r", Branch: "main", TokenHash: "token"},
+	}
+	h.cache.Set(&cache.Entry{
+		Key:      execctx.CacheKey(req.Context, req.Args),
+		Stdout:   []byte("{\"number\":8}"),
+		ExitCode: 0,
+		CachedAt: time.Now().Add(-60 * time.Second),
+		TTL:      30 * time.Second,
+	})
+	h.execute = func(context.Context, string, []string, string, authenv.Environment) *executor.Result {
+		t.Fatal("poll inside grace must not call gh")
+		return nil
+	}
+
+	resp := h.Handle(req)
+	if resp.ExitCode != 0 || !resp.Cached {
+		t.Fatalf("expected grace hit, got exit %d cached %v", resp.ExitCode, resp.Cached)
+	}
+}
+
+func TestHandlerFlushScopedToRepository(t *testing.T) {
+	h := newTestHandler()
+	for _, entry := range []*cache.Entry{
+		{Key: "pr", Host: "github.com", Repo: "o/r", Resource: allowlist.ResourcePR, CachedAt: time.Now(), TTL: time.Minute},
+		{Key: "issue", Host: "github.com", Repo: "o/r", Resource: allowlist.ResourceIssue, CachedAt: time.Now(), TTL: time.Minute},
+		{Key: "other", Host: "github.com", Repo: "o/other", Resource: allowlist.ResourcePR, CachedAt: time.Now(), TTL: time.Minute},
+	} {
+		h.cache.Set(entry)
+	}
+
+	resp := h.Handle(&protocol.Request{
+		Type:    protocol.TypeFlush,
+		Context: execctx.ExecContext{Host: "github.com", Repo: "o/r"},
+	})
+	if got := string(resp.Stdout); got != "flushed 2 entries\n" {
+		t.Fatalf("flush response = %q, want 2 entries", got)
+	}
+	if h.cache.Size() != 1 {
+		t.Fatalf("cache size = %d, want 1 remaining entry", h.cache.Size())
+	}
+}
+
 func newTestHandler() *Handler {
 	cfg := &config.Config{GHPath: "gh", MaxCacheEntries: 100, TTL: 30 * time.Second}
 	return NewHandler(cfg, cache.New(100), allowlist.NewClassifier(nil), metrics.New())

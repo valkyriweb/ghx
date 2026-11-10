@@ -215,16 +215,21 @@ func (c *Classifier) Classify(args []string) Classification {
 
 func (c *Classifier) classifyAPI(args []string) Classification {
 	// gh api [flags] <endpoint>
-	// Only cache GET requests (default method is GET)
-	method := "GET"
-	for i, arg := range args {
-		if (arg == "-X" || arg == "--method") && i+1 < len(args) {
-			method = strings.ToUpper(args[i+1])
+	// The default method is GET, but gh switches it to POST when -f/-F or
+	// --input adds parameters. An explicit --method wins. graphql is a POST.
+	// Caching either replays a write or drops a body that is not in the key.
+	method, explicit := apiMethod(args)
+	if !explicit {
+		if apiHasParameters(args) || apiHasInput(args) || apiEndpoint(args) == "graphql" {
+			method = "POST"
+		} else {
+			method = "GET"
 		}
 	}
-
-	if method != "GET" {
-		return Classification{Type: Mutation, Resource: ResourceAPI}
+	// A magic -F value that starts with @ is file contents, not part of the
+	// cache key. -f is a literal string and does not read a file.
+	if strings.ToUpper(method) != "GET" || apiHasInput(args) || apiHasFileField(args) {
+		return Classification{Type: Mutation, Resource: ResourceAPI, CmdKey: "api_mutation"}
 	}
 
 	return Classification{
@@ -232,4 +237,125 @@ func (c *Classifier) classifyAPI(args []string) Classification {
 		Resource: ResourceAPI,
 		CmdKey:   "api_get",
 	}
+}
+
+// apiValueFlags are gh api flags whose next argument is a value, not the endpoint.
+var apiValueFlags = map[string]bool{
+	"-X": true, "--method": true,
+	"-H": true, "--header": true,
+	"-f": true, "--raw-field": true,
+	"-F": true, "--field": true,
+	"-q": true, "--jq": true,
+	"-t": true, "--template": true,
+	"-p": true, "--preview": true,
+	"--hostname": true,
+	"--input":    true,
+	"--cache":    true,
+}
+
+func apiMethod(args []string) (string, bool) {
+	// pflag keeps the last string value. The first -X must not win.
+	method := ""
+	explicit := false
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		switch {
+		case arg == "-X" || arg == "--method":
+			explicit = true
+			if i+1 < len(args) {
+				i++
+				method = args[i]
+			} else {
+				method = ""
+			}
+		case strings.HasPrefix(arg, "--method="):
+			explicit = true
+			method = strings.TrimPrefix(arg, "--method=")
+		case strings.HasPrefix(arg, "-X") && len(arg) > 2:
+			explicit = true
+			method = arg[2:]
+		case apiValueFlags[arg] && !strings.Contains(arg, "="):
+			i++
+		}
+	}
+	return method, explicit
+}
+
+// apiHasFileField reports a magic -F/--field value read from a file (`@path`).
+// The filename is in the cache key; the contents are not.
+func apiHasFileField(args []string) bool {
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		switch {
+		case arg == "-F" || arg == "--field":
+			if i+1 < len(args) && magicFieldIsFile(args[i+1]) {
+				return true
+			}
+		case strings.HasPrefix(arg, "--field=") && magicFieldIsFile(arg):
+			return true
+		case strings.HasPrefix(arg, "-F") && len(arg) > 2 && magicFieldIsFile(arg[2:]):
+			return true
+		}
+	}
+	return false
+}
+
+func magicFieldIsFile(spec string) bool {
+	spec = strings.TrimPrefix(spec, "--field=")
+	eq := strings.IndexByte(spec, '=')
+	if eq < 0 {
+		return false
+	}
+	return strings.HasPrefix(spec[eq+1:], "@")
+}
+
+func apiHasParameters(args []string) bool {
+	for _, arg := range args[1:] {
+		switch {
+		case arg == "-f" || arg == "-F" || arg == "--field" || arg == "--raw-field":
+			return true
+		case strings.HasPrefix(arg, "--field=") || strings.HasPrefix(arg, "--raw-field="):
+			return true
+		case strings.HasPrefix(arg, "-f") && len(arg) > 2:
+			return true
+		case strings.HasPrefix(arg, "-F") && len(arg) > 2:
+			return true
+		}
+	}
+	return false
+}
+
+func apiHasInput(args []string) bool {
+	for _, arg := range args[1:] {
+		if arg == "--input" || strings.HasPrefix(arg, "--input=") {
+			return true
+		}
+	}
+	return false
+}
+
+func apiEndpoint(args []string) string {
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			if i+1 < len(args) {
+				return strings.TrimPrefix(args[i+1], "/")
+			}
+			return ""
+		}
+		if strings.HasPrefix(arg, "-") {
+			if !strings.Contains(arg, "=") && apiValueFlags[arg] {
+				i++
+			}
+			continue
+		}
+		return strings.TrimPrefix(arg, "/")
+	}
+	return ""
 }
