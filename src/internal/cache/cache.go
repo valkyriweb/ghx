@@ -51,6 +51,17 @@ func (c *Cache) OnEvict(fn func(key string)) {
 
 // Get retrieves an entry by key. Returns nil if not found or expired.
 func (c *Cache) Get(key string) *Entry {
+	return c.GetUsable(key, 0)
+}
+
+// GetUsable returns the entry when it is younger than TTL+grace.
+// grace covers a poll that sleeps for the configured TTL: the next identical
+// call arrives a few seconds after expiry and would otherwise miss every time.
+// An entry older than TTL+grace is removed.
+func (c *Cache) GetUsable(key string, grace time.Duration) *Entry {
+	if grace < 0 {
+		grace = 0
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -60,7 +71,11 @@ func (c *Cache) Get(key string) *Entry {
 	}
 
 	entry := elem.Value.(*Entry)
-	if entry.IsExpired() {
+	limit := entry.TTL
+	if entry.TTL > 0 {
+		limit += grace
+	}
+	if time.Since(entry.CachedAt) > limit {
 		c.removeElement(elem)
 		return nil
 	}

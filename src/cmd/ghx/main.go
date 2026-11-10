@@ -55,27 +55,33 @@ func main() {
 
 	// Short-circuit: passthrough commands (e.g. auth login, config, codespace) are
 	// interactive or otherwise unsuitable for the daemon. Execute gh directly so the
-	// user gets a full TTY and no IPC timeout can occur.
+	// user gets a full TTY and no IPC timeout can occur. Watch-style passthrough
+	// (gh run watch) still gets the transient-timeout retry.
 	classifier := allowlist.NewClassifier(cfg.AdditionalCache)
-	if classifier.Classify(ghArgs).Type == allowlist.Passthrough {
+	classification := classifier.Classify(ghArgs)
+	if classification.Type == allowlist.Passthrough {
+		if shouldBypassDaemon(ghArgs) {
+			execWatchWithRetry(cfg.GHPath, ghArgs)
+			return
+		}
 		execDirect(cfg.GHPath, ghArgs)
 		return
 	}
 
-	// Bypass the daemon when stdin is piped. The daemon protocol does not
-	// forward stdin, so commands that read it (gh secret set, gh api --input -,
-	// gh issue create --body-file -, etc.) would silently receive an empty
-	// stream. Caching stdin-driven calls is also low value — they're writes,
-	// not reads. execDirect replaces the current process so stdin is preserved.
-	if stat, err := os.Stdin.Stat(); err == nil && (stat.Mode()&os.ModeCharDevice) == 0 {
+	// Bypass the daemon only when stdin is a pipe AND the command reads it.
+	// The daemon protocol does not forward stdin, so `gh api --input -` and
+	// `gh issue create --body-file -` must exec gh directly. A pipe on a
+	// cacheable read (the way agents invoke `gh pr view`) does not mean the
+	// command reads stdin; bypassing there skipped the cache on every agent call.
+	if shouldBypassPipedStdin(classification, ghArgs, stdinIsCharDevice()) {
 		execDirect(cfg.GHPath, ghArgs)
 		return
 	}
 
-	// Bypass long-running watch commands. They are inherently live, not cacheable,
-	// and can legitimately exceed the client/daemon response deadline.
+	// Watch commands stay out of the request/response daemon: they run for as
+	// long as CI does. A transient TCP timeout used to exit the watch; retry it.
 	if shouldBypassDaemon(ghArgs) {
-		execDirect(cfg.GHPath, ghArgs)
+		execWatchWithRetry(cfg.GHPath, ghArgs)
 		return
 	}
 
@@ -179,6 +185,57 @@ func shouldBypassDaemon(args []string) bool {
 	}
 	for _, arg := range args {
 		if arg == "--watch" || strings.HasPrefix(arg, "--watch=") {
+			return true
+		}
+	}
+	return false
+}
+
+// stdinFileFlags are flags whose value "-" means "read this from stdin".
+var stdinFileFlags = map[string]bool{
+	"--input":        true,
+	"--body-file":    true,
+	"--body":         true,
+	"--notes-file":   true,
+	"--recover-file": true,
+}
+
+func stdinIsCharDevice() bool {
+	stat, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return stat.Mode()&os.ModeCharDevice != 0
+}
+
+// shouldBypassPipedStdin reports whether a non-terminal stdin must skip the
+// daemon. Cacheable reads do not read stdin, so an agent pipe is not a reason
+// to bypass. Mutations and commands that take "-" as a file still bypass.
+func shouldBypassPipedStdin(class allowlist.Classification, args []string, stdinIsCharDevice bool) bool {
+	if stdinIsCharDevice {
+		return false
+	}
+	if class.Type != allowlist.Cacheable || commandReadsStdin(args) || isGraphQLAPI(args) {
+		return true
+	}
+	return false
+}
+
+// isGraphQLAPI reports `gh api graphql`, which is a POST. The classifier treats
+// an api call without -X as a cacheable GET. Proxying it would cache mutations.
+func isGraphQLAPI(args []string) bool {
+	return len(args) >= 2 && args[0] == "api" && args[1] == "graphql"
+}
+
+func commandReadsStdin(args []string) bool {
+	for i, arg := range args {
+		if arg == "-" {
+			return true
+		}
+		if eq := strings.IndexByte(arg, '='); eq > 0 && arg[eq+1:] == "-" && stdinFileFlags[arg[:eq]] {
+			return true
+		}
+		if stdinFileFlags[arg] && i+1 < len(args) && args[i+1] == "-" {
 			return true
 		}
 	}

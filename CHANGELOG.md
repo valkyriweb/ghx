@@ -5,6 +5,16 @@ Fork of `brunoborges/ghx`. See `UPSTREAM.md` for provenance.
 ## Unreleased
 
 ### Fixed
+- Cacheable reads no longer skip the daemon just because stdin is a pipe.
+  Agent invocations of `gh pr view`, `gh pr checks`, `gh api` GET, and
+  `gh run view` now share the cache. Commands that read stdin still bypass.
+- Cache completed `gh pr checks` reads, including exit 8 (pending) and exit 1
+  (a check failed). Transport and auth failures are still not cached.
+- Keep a cached read usable for 45s past its TTL so a poll that sleeps for the
+  TTL does not miss on every iteration.
+- Retry `gh pr checks --watch` and `gh run watch` after a transient network
+  timeout instead of exiting. Semantic failures are not retried.
+
 - Make detached daemon start/restart wait until `ghxd` accepts control requests,
   preventing `gh xdaemon restart && gh xcache flush` from racing a freshly
   spawned daemon.

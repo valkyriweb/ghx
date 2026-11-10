@@ -120,6 +120,10 @@ The allowlist is configurable — users can add custom commands via `additional_
 
 These commands are **passed through directly** to `gh` with no daemon involvement, preserving TTY, stdin, and interactive behavior.
 
+A non-terminal stdin is not itself a bypass. Agent shells invoke `gh` with a pipe; cacheable reads (`pr view`, `pr checks`, `api` GET, `run view`) still go through the daemon. Only commands that read stdin (`--input -`, `--body-file -`, a bare `-`) skip the daemon, because the protocol does not forward stdin.
+
+Watch commands stay outside the daemon. A transient transport error (`read: operation timed out` and the other markers in `executor.IsTransientNetwork`) is retried, up to 8 times, instead of ending the watch. A semantic exit (checks failed, run completed) is not retried.
+
 ### Request Coalescing (Singleflight)
 
 When multiple clients request the same cache key simultaneously and it's a miss, only **one** `gh` execution occurs. All waiting clients receive the same result. This is critical for the multi-agent scenario where 5+ agents may request the same PR list within milliseconds.

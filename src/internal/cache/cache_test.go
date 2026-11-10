@@ -40,6 +40,36 @@ func TestTTLExpiry(t *testing.T) {
 	}
 }
 
+func TestGetUsableHonorsGraceThenDrops(t *testing.T) {
+	c := New(10)
+	c.Set(&Entry{
+		Key:      "k1",
+		Stdout:   []byte("old"),
+		CachedAt: time.Now().Add(-50 * time.Second),
+		TTL:      30 * time.Second,
+	})
+	if c.Get("k1") != nil {
+		t.Fatal("strict get should drop an expired entry")
+	}
+	c.Set(&Entry{
+		Key:      "k1",
+		Stdout:   []byte("old"),
+		CachedAt: time.Now().Add(-50 * time.Second),
+		TTL:      30 * time.Second,
+	})
+	if c.GetUsable("k1", 45*time.Second) == nil {
+		t.Fatal("expected entry inside grace")
+	}
+	c.Set(&Entry{
+		Key:      "k2",
+		CachedAt: time.Now().Add(-90 * time.Second),
+		TTL:      30 * time.Second,
+	})
+	if c.GetUsable("k2", 45*time.Second) != nil {
+		t.Fatal("expected entry past grace to be dropped")
+	}
+}
+
 func TestLRUEviction(t *testing.T) {
 	c := New(2)
 	c.Set(&Entry{Key: "a", CachedAt: time.Now(), TTL: time.Minute})
