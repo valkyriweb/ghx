@@ -14,13 +14,15 @@ import (
 const maxTransientWatchRetries = 8
 
 // runWithTransientRetry runs a watch child until it exits for a reason other
-// than a transport fault. sleep and onRetry are injectable so the retry
-// decision can be tested without a network or a clock.
+// than a transport fault. The byte slice is stderr only: a check listing on
+// stdout can contain the same words as a transport error and must not retry.
+// sleep and onRetry are injectable so the decision can be tested without a
+// network or a clock.
 func runWithTransientRetry(run func() (int, []byte), sleep func(time.Duration), onRetry func(attempt int)) int {
 	backoff := time.Second
 	for attempt := 1; ; attempt++ {
-		code, output := run()
-		if code == 0 || !executor.IsTransientNetwork(output) {
+		code, stderr := run()
+		if code == 0 || !executor.IsTransientNetwork(stderr) {
 			return code
 		}
 		if attempt > maxTransientWatchRetries {

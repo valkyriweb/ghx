@@ -208,28 +208,24 @@ func stdinIsCharDevice() bool {
 	return stat.Mode()&os.ModeCharDevice != 0
 }
 
-// shouldBypassPipedStdin reports whether a non-terminal stdin must skip the
-// daemon. Cacheable reads do not read stdin, so an agent pipe is not a reason
-// to bypass. Mutations and commands that take "-" as a file still bypass.
+// shouldBypassPipedStdin reports whether stdin forces a direct exec.
+// Cacheable reads do not read stdin, so an agent pipe is not a reason to
+// bypass. The daemon never forwards stdin, so a command that reads it bypasses
+// even from a terminal. Mutations bypass only when stdin is a pipe; a terminal
+// mutation still goes to the daemon so it can invalidate.
 func shouldBypassPipedStdin(class allowlist.Classification, args []string, stdinIsCharDevice bool) bool {
+	if commandReadsStdin(args) {
+		return true
+	}
 	if stdinIsCharDevice {
 		return false
 	}
-	if class.Type != allowlist.Cacheable || commandReadsStdin(args) || isGraphQLAPI(args) {
-		return true
-	}
-	return false
-}
-
-// isGraphQLAPI reports `gh api graphql`, which is a POST. The classifier treats
-// an api call without -X as a cacheable GET. Proxying it would cache mutations.
-func isGraphQLAPI(args []string) bool {
-	return len(args) >= 2 && args[0] == "api" && args[1] == "graphql"
+	return class.Type != allowlist.Cacheable
 }
 
 func commandReadsStdin(args []string) bool {
 	for i, arg := range args {
-		if arg == "-" {
+		if arg == "-" || fieldReadsStdin(arg) {
 			return true
 		}
 		if eq := strings.IndexByte(arg, '='); eq > 0 && arg[eq+1:] == "-" && stdinFileFlags[arg[:eq]] {
@@ -238,8 +234,20 @@ func commandReadsStdin(args []string) bool {
 		if stdinFileFlags[arg] && i+1 < len(args) && args[i+1] == "-" {
 			return true
 		}
+		if isAPIFieldFlag(arg) && i+1 < len(args) && fieldReadsStdin(args[i+1]) {
+			return true
+		}
 	}
 	return false
+}
+
+// fieldReadsStdin reports a gh api -f/-F value that reads stdin (`@-`).
+func fieldReadsStdin(value string) bool {
+	return value == "@-" || strings.HasSuffix(value, "=@-")
+}
+
+func isAPIFieldFlag(arg string) bool {
+	return arg == "-f" || arg == "-F" || arg == "--field" || arg == "--raw-field"
 }
 
 // parseGHXFlags extracts ghx-specific flags from the argument list.

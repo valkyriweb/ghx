@@ -3,8 +3,6 @@
 package main
 
 import (
-	"bytes"
-	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -42,11 +40,7 @@ func execWatchWithRetry(ghPath string, args []string) {
 		if err != nil {
 			return 1, []byte(err.Error())
 		}
-		var captured bytes.Buffer
-		cmd := exec.Command(path, args...)
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = io.MultiWriter(os.Stdout, &captured)
-		cmd.Stderr = io.MultiWriter(os.Stderr, &captured)
+		cmd, stderr := prepareWatchCmd(path, args)
 		mu.Lock()
 		child = cmd
 		mu.Unlock()
@@ -55,15 +49,15 @@ func execWatchWithRetry(ghPath string, args []string) {
 		child = nil
 		mu.Unlock()
 		if err == nil {
-			return 0, captured.Bytes()
+			return 0, stderr()
 		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
 				return 128 + int(status.Signal()), nil
 			}
-			return exitErr.ExitCode(), captured.Bytes()
+			return exitErr.ExitCode(), stderr()
 		}
-		return 1, append(captured.Bytes(), []byte(err.Error())...)
+		return 1, append(stderr(), []byte(err.Error())...)
 	}, timeSleep, watchRetryNotice)
 	os.Exit(code)
 }

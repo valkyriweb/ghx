@@ -54,11 +54,36 @@ func TestPipedStdinStillBypassesStdinReadersAndMutations(t *testing.T) {
 		{"issue", "create", "--body-file", "-"},
 		{"pr", "comment", "8", "--body", "note"},
 		{"api", "graphql", "-f", "query={viewer{login}}"},
+		{"api", "/repos/o/r/issues", "-f", "title=x"},
+		{"api", "-X", "GET", "search/issues", "-F", "q=@-"},
+		{"api", "--field=q=@-", "-X", "GET", "search/issues"},
 	}
 	for _, args := range cases {
 		class := allowlist.NewClassifier(nil).Classify(args)
 		if !shouldBypassPipedStdin(class, args, false) {
 			t.Fatalf("expected %v to bypass when stdin is a pipe", args)
 		}
+	}
+	// A command that reads stdin bypasses even from a terminal: the daemon
+	// protocol does not forward stdin.
+	for _, args := range [][]string{
+		{"api", "--input", "-", "/repos/o/r"},
+		{"api", "-X", "GET", "search/issues", "-F", "q=@-"},
+	} {
+		class := allowlist.NewClassifier(nil).Classify(args)
+		if !shouldBypassPipedStdin(class, args, true) {
+			t.Fatalf("expected %v to bypass when it reads stdin", args)
+		}
+	}
+}
+
+func TestExplicitGETWithQueryFieldsUsesDaemon(t *testing.T) {
+	args := []string{"api", "--method=GET", "search/issues", "-F", "q=is:open"}
+	class := allowlist.NewClassifier(nil).Classify(args)
+	if class.Type != allowlist.Cacheable {
+		t.Fatalf("type=%d, want cacheable", class.Type)
+	}
+	if shouldBypassPipedStdin(class, args, false) {
+		t.Fatal("a piped explicit GET must use the daemon")
 	}
 }

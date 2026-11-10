@@ -120,9 +120,11 @@ The allowlist is configurable — users can add custom commands via `additional_
 
 These commands are **passed through directly** to `gh` with no daemon involvement, preserving TTY, stdin, and interactive behavior.
 
-A non-terminal stdin is not itself a bypass. Agent shells invoke `gh` with a pipe; cacheable reads (`pr view`, `pr checks`, `api` GET, `run view`) still go through the daemon. Only commands that read stdin (`--input -`, `--body-file -`, a bare `-`) skip the daemon, because the protocol does not forward stdin.
+A non-terminal stdin is not itself a bypass. Agent shells invoke `gh` with a pipe; cacheable reads (`pr view`, `pr checks`, `api` GET, `run view`) still go through the daemon. Commands that read stdin (`--input -`, `--body-file -`, a bare `-`, `gh api -F key=@-`) skip the daemon, because the protocol does not forward stdin.
 
-Watch commands stay outside the daemon. A transient transport error (`read: operation timed out` and the other markers in `executor.IsTransientNetwork`) is retried, up to 8 times, instead of ending the watch. A semantic exit (checks failed, run completed) is not retried.
+`gh api` without `--method` is a POST when `-f`, `-F`, or `--input` is set, and `graphql` is a POST. Those calls are not cached. An explicit `--method GET` with field values in the arguments stays a cacheable query.
+
+Watch commands stay outside the daemon. Stdout stays the caller terminal so `gh pr checks --watch` can redraw. A transient transport error on stderr (`read: operation timed out` and the other markers in `executor.IsTransientNetwork`) is retried, up to 8 times, instead of ending the watch. The retry decision does not read the check listing. A semantic exit (checks failed, run completed) is not retried.
 
 ### Request Coalescing (Singleflight)
 
