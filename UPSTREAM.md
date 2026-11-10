@@ -33,6 +33,17 @@ Local commits on top of the fork point:
 - **`ci(release): publish from this fork + its homebrew tap`** — release
   workflow points at `${{ github.repository }}` and `valkyriweb/homebrew-tap`.
 
+## Local release tooling
+
+`scripts/verify` and `scripts/release` require Python 3 (standard library only).
+The gate runs an offline release fixture with fake builds and intercepted GitHub
+releases, tags, and pushes. It also requires bash, git, tar, and shasum.
+
+Before running `scripts/release vX.Y.Z`, add a matching `## vX.Y.Z` changelog
+heading (optionally bracketed, followed by a date). The script rejects a missing
+heading before verification, builds, or publication. It updates both the tap
+formula and the `ghx` entry in `tests/releases.json` from the new archive checksums.
+
 ## Refresh from upstream
 
 ```bash

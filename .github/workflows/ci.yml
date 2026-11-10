@@ -20,6 +20,9 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Offline release fixture
+        run: python3 -B -m unittest discover -s tests -p 'test_release.py'
+
       - name: Build
         run: go build ./...
 
