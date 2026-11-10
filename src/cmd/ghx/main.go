@@ -68,12 +68,15 @@ func main() {
 		return
 	}
 
-	// Bypass the daemon only when stdin is a pipe AND the command reads it.
-	// The daemon protocol does not forward stdin, so `gh api --input -` and
-	// `gh issue create --body-file -` must exec gh directly. A pipe on a
-	// cacheable read (the way agents invoke `gh pr view`) does not mean the
-	// command reads stdin; bypassing there skipped the cache on every agent call.
-	if shouldBypassPipedStdin(classification, ghArgs, stdinIsCharDevice()) {
+	// The daemon does not forward stdin, so commands that read it must exec gh
+	// directly. Invalidate cached data after direct mutations, even when the
+	// child exits with an error because the mutation may have partially completed.
+	readsStdin := commandReadsStdin(ghArgs)
+	if readsStdin {
+		if shouldFlushAfterDirectMutation(classification, readsStdin) {
+			execDirectWithCacheFlush(cfg, ghArgs)
+			return
+		}
 		execDirect(cfg.GHPath, ghArgs)
 		return
 	}
@@ -201,30 +204,17 @@ var stdinFileFlags = map[string]bool{
 	"--recover-file": true,
 }
 
-func stdinIsCharDevice() bool {
-	stat, err := os.Stdin.Stat()
-	if err != nil {
-		return false
-	}
-	return stat.Mode()&os.ModeCharDevice != 0
-}
-
-// shouldBypassPipedStdin reports whether stdin forces a direct exec.
-// Cacheable reads do not read stdin, so an agent pipe is not a reason to
-// bypass. The daemon never forwards stdin, so a command that reads it bypasses
-// even from a terminal. Mutations bypass only when stdin is a pipe; a terminal
-// mutation still goes to the daemon so it can invalidate.
-func shouldBypassPipedStdin(class allowlist.Classification, args []string, stdinIsCharDevice bool) bool {
-	if commandReadsStdin(args) {
-		return true
-	}
-	if stdinIsCharDevice {
-		return false
-	}
-	return class.Type != allowlist.Cacheable
+// shouldFlushAfterDirectMutation identifies direct mutations that read stdin.
+// The daemon cannot forward stdin, so gh runs directly and the cache is flushed
+// after it exits to prevent stale reads.
+func shouldFlushAfterDirectMutation(class allowlist.Classification, readsStdin bool) bool {
+	return class.Type == allowlist.Mutation && readsStdin
 }
 
 func commandReadsStdin(args []string) bool {
+	if commandReadsStdinByDefault(args) {
+		return true
+	}
 	for i, arg := range args {
 		if eq := strings.IndexByte(arg, '='); eq > 0 && arg[eq+1:] == "-" && stdinFileFlags[arg[:eq]] {
 			return true
@@ -239,6 +229,22 @@ func commandReadsStdin(args []string) bool {
 		if strings.HasPrefix(arg, "--field=") && magicFieldReadsStdin(arg) {
 			return true
 		}
+	}
+	return false
+}
+
+// Secret and variable set read their value from stdin when --body is omitted.
+func commandReadsStdinByDefault(args []string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if (args[i] != "secret" && args[i] != "variable") || args[i+1] != "set" {
+			continue
+		}
+		for _, arg := range args[i+2:] {
+			if arg == "--body" || arg == "-b" || strings.HasPrefix(arg, "--body=") || strings.HasPrefix(arg, "-b=") {
+				return false
+			}
+		}
+		return true
 	}
 	return false
 }
@@ -279,6 +285,24 @@ func parseGHXFlags(args []string) (ghArgs []string, noCache bool, ttlOverride in
 type daemonClient interface {
 	IsRunning() bool
 	Send(*protocol.Request) (*protocol.Response, error)
+}
+
+func flushCacheAfterDirectMutation(cl daemonClient) error {
+	if !cl.IsRunning() {
+		return nil
+	}
+	_, err := cl.Send(&protocol.Request{Type: protocol.TypeFlush})
+	return err
+}
+
+func execDirectWithCacheFlush(cfg *config.Config, args []string) {
+	cl := client.New(cfg.SocketPath)
+	code := runDirectAndAfter(cfg.GHPath, args, func() {
+		if err := flushCacheAfterDirectMutation(cl); err != nil {
+			fmt.Fprintf(os.Stderr, "ghx: warning: cache flush after direct mutation failed: %v\n", err)
+		}
+	})
+	os.Exit(code)
 }
 
 // waitDaemonReady waits until the daemon accepts control requests, not merely

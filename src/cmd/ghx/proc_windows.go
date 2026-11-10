@@ -50,6 +50,35 @@ func execDirect(ghPath string, args []string) {
 	os.Exit(0)
 }
 
+// runDirectAndAfter runs gh with inherited stdio, then runs after once the
+// child exits. The wrapper is needed when a direct mutation reads stdin so the
+// daemon can invalidate its cache after the mutation completes.
+func runDirectAndAfter(ghPath string, args []string, after func()) int {
+	path, err := exec.LookPath(ghPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ghx: gh not found: %v\n", err)
+		return 1
+	}
+	cmd := exec.Command(path, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "ghx: %v\n", err)
+		return 1
+	}
+	err = cmd.Wait()
+	after()
+	if err == nil {
+		return 0
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		return exitErr.ExitCode()
+	}
+	fmt.Fprintf(os.Stderr, "ghx: %v\n", err)
+	return 1
+}
+
 // processAlive reports whether a process with the given PID currently exists.
 // On Windows, os.FindProcess opens a real handle and fails for unknown PIDs.
 func processAlive(pid int) bool {
